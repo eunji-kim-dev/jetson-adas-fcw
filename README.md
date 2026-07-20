@@ -45,3 +45,16 @@ C++와 OpenCV를 사용하여 블랙박스 영상 기반 ADAS 기능을 구현�
 - 객체 추적
 - ADAS 이벤트 판단 로직
 - FPS 및 Latency 측정
+
+## 주요 문제 해결
+
+- ROI 시각화를 YOLO 추론 전에 적용해 정면 차량 검출률이 저하되는 문제를 발견하고, 원본 프레임 추론 후 ROI를 표시하도록 처리 순서를 수정했습니다.
+- 원거리 소형 차량의 검출 누락을 줄이기 위해 confidence threshold를 0.40에서 0.25로 조정했습니다.
+- IoU 단독 매칭으로 동일 차량의 Tracking ID가 변경되는 문제를 분석하고, Kalman Filter 예측과 중심점 거리·박스 크기 조건을 결합한 추적 방식으로 개선했습니다.
+- 정상 추적 ID와 오래된 ID의 매칭 순서를 분리해 기존 ID가 현재 객체를 가로채는 문제를 줄였습니다.
+- 프레임별 추론 시간과 전체 처리 FPS를 측정해 실시간 처리 성능을 수치화했습니다.
+
+상세한 오류 분석과 해결 과정은 다음 문서에 기록했습니다.
+
+- [Troubleshooting](docs/troubleshooting.md)
+- [Development Log](docs/devlog.md)
