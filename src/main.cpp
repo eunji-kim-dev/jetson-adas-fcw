@@ -4,16 +4,15 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 int main(int argc, char* argv[]) {
     // 실행할 때 경로 안 넘기면 videos/input.mp4 사용
     const std::string inputPath =
         argc >= 2 ? argv[1] : "videos/input.mp4";
 
-    // 영상 열기
     cv::VideoCapture capture(inputPath);
 
-    // 못 열면 여기서 끝냄
     if (!capture.isOpened()) {
         std::cerr
             << "[ERROR] 영상을 열 수 없습니다: "
@@ -51,7 +50,7 @@ int main(int argc, char* argv[]) {
               << totalFrames << '\n';
 
     const std::string outputPath =
-        "results/step2_output.avi";
+        "results/step3_roi_output.avi";
 
     // 결과 저장용 writer. 코덱은 MJPG, 나머지는 원본이랑 동일하게
     cv::VideoWriter writer(
@@ -61,13 +60,34 @@ int main(int argc, char* argv[]) {
         cv::Size(width, height)
     );
 
-    // results 폴더가 없거나 코덱 문제 있으면 여기서 걸림
     if (!writer.isOpened()) {
         std::cerr
             << "[ERROR] 결과 영상 파일을 만들 수 없습니다.\n";
 
         return 1;
     }
+
+    // 차량이 진행할 것으로 예상되는 영역을 사다리꼴로 잡음
+    // 좌표를 픽셀 고정값이 아니라 비율로 계산해서
+    // 720p든 1080p든 해상도 바뀌어도 그대로 동작함
+    const std::vector<cv::Point> drivingRoi = {
+        cv::Point(
+            static_cast<int>(width * 0.40),
+            static_cast<int>(height * 0.60)
+        ),
+        cv::Point(
+            static_cast<int>(width * 0.60),
+            static_cast<int>(height * 0.60)
+        ),
+        cv::Point(
+            static_cast<int>(width * 0.90),
+            static_cast<int>(height * 0.95)
+        ),
+        cv::Point(
+            static_cast<int>(width * 0.10),
+            static_cast<int>(height * 0.95)
+        )
+    };
 
     cv::Mat frame;
     int processedFrames = 0;
@@ -76,9 +96,38 @@ int main(int argc, char* argv[]) {
     const auto processingStart =
         std::chrono::steady_clock::now();
 
-    // 프레임 단위로 읽어서 처리. read()가 false 리턴하면 영상 끝
     while (capture.read(frame)) {
         ++processedFrames;
+
+        // frame에 바로 칠하면 도로가 통째로 가려져서
+        // 복사본(overlay)에 먼저 칠하고 나중에 섞는 방식
+        cv::Mat overlay = frame.clone();
+
+        // 사다리꼴 내부를 초록으로 채움
+        cv::fillConvexPoly(
+            overlay,
+            drivingRoi,
+            cv::Scalar(0, 255, 0)
+        );
+
+        // overlay 25% + 원본 75%로 합성 -> ROI가 반투명하게 보임
+        cv::addWeighted(
+            overlay,
+            0.25,
+            frame,
+            0.75,
+            0.0,
+            frame
+        );
+
+        // 테두리는 반투명이면 잘 안 보여서 따로 진하게 한 번 더
+        cv::polylines(
+            frame,
+            drivingRoi,
+            true,
+            cv::Scalar(0, 255, 0),
+            3
+        );
 
         // 프레임에 얹을 텍스트
         const std::string frameText =
@@ -110,7 +159,21 @@ int main(int argc, char* argv[]) {
             2
         );
 
-        // 텍스트 얹은 프레임을 결과 파일에 기록
+        // ROI 라벨. 사다리꼴 윗변 바로 위에 오도록 비율로 위치 잡음
+        cv::putText(
+            frame,
+            "Driving ROI",
+            cv::Point(
+                static_cast<int>(width * 0.42),
+                static_cast<int>(height * 0.57)
+            ),
+            cv::FONT_HERSHEY_SIMPLEX,
+            0.8,
+            cv::Scalar(0, 255, 0),
+            2
+        );
+
+        // 다 그린 프레임을 결과 파일에 기록
         writer.write(frame);
     }
 
@@ -134,9 +197,12 @@ int main(int argc, char* argv[]) {
 
     // 처리 결과 요약 출력
     std::cout << '\n';
-    std::cout << "[SUCCESS] 영상 처리가 완료되었습니다.\n";
-    std::cout << "처리 프레임 수: "
-              << processedFrames << '\n';
+    std::cout
+        << "[SUCCESS] ROI 영상 처리가 완료되었습니다.\n";
+
+    std::cout
+        << "처리 프레임 수: "
+        << processedFrames << '\n';
 
     std::cout
         << "처리 시간: "
@@ -148,8 +214,9 @@ int main(int argc, char* argv[]) {
         << std::fixed << std::setprecision(2)
         << processingFps << " FPS\n";
 
-    std::cout << "결과 파일: "
-              << outputPath << '\n';
+    std::cout
+        << "결과 파일: "
+        << outputPath << '\n';
 
     return 0;
 }
