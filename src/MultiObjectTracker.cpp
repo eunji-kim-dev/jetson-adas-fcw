@@ -874,32 +874,37 @@ std::vector<TrackedObject> MultiObjectTracker::update(
         }
     }
 
-    /*
-     * 남은 고신뢰도 검출만 새 Track으로 생성합니다.
-     *
-     * 저신뢰도 검출은 기존 ID를 유지하는 데만 사용하며
-     * 새 Track이나 새 ID를 만들지 않습니다.
-     */
-    for (const int detectionIndex
-         : highDetectionIndices) {
+// 동영상 17초 ID:29 0.26 오류 수정
+// 새 트랙 생성 기준은 유지 기준보다 살짝 높게 잡음
+//   0.25~0.30 : 기존 트랙 매칭에만 사용 (ID 유지용)
+//   0.30 이상 : 신규 트랙 생성 허용
+// 0.26짜리 순간 오검출이 새 ID로 인식되는 것을 방지
+
+    constexpr float newTrackConfidenceThreshold = 0.30F;
+
+    for (const int detectionIndex : highDetectionIndices) {
+        if (matchedDetections[detectionIndex]) {
+            continue;
+        }
+
+        const Detection& detection = detections[detectionIndex];
+
         if (
-            matchedDetections[detectionIndex]
+            detection.confidence <
+            newTrackConfidenceThreshold
         ) {
             continue;
         }
 
-        tracks_.emplace_back(
-            detections[detectionIndex]
-        );
+        tracks_.emplace_back(detection);
 
-        TrackState& newTrack =
-            tracks_.back();
+        TrackState& newTrack = tracks_.back();
 
         if (minConfirmationHits_ <= 1) {
             newTrack.confirmed = true;
             newTrack.id = nextTrackId_;
             ++nextTrackId_;
-        }
+         }
     }
 
     /*
