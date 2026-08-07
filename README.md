@@ -4,14 +4,22 @@
 
 카메라 보정값도, 거리 센서도, 자차 속도 정보도 없이 **바운딩 박스의 화면상 크기 변화만으로** 충돌 위험을 추정합니다. YOLOv8 ONNX로 객체를 검출하고, Kalman Filter로 추적하며, 선행 차량 한 대를 골라 TTC-P(TTC Proxy)를 계산해 SAFE / CAUTION / DANGER를 판정합니다.
 
-<!-- TODO: 데모 GIF 추가 후 아래 주석 해제
-     ffmpeg -i results/step7_scene_change_fixed_output.avi -ss 10 -t 8 \
-       -vf "fps=12,scale=640:-1" docs/demo.gif
+## 실행 결과
 
-![demo](docs/demo.gif)
--->
+![LEAD 선택과 TTC-P 계산](docs/assets/adas_demo.gif)
 
----
+옆 차선의 대형 트럭은 `SIDE`로 분류해 위험 분석에서 제외하고,
+내 차선 선행 차량(`LEAD`)에 대해서만 TTC-P를 계산합니다.
+
+![장면 전환 감지와 상태 초기화](docs/assets/adas_scene_change.gif)
+
+장면 전환이 감지되면 Tracker · LEAD · TTC-P 이력을 초기화하고 0.5초간 위험 분석을 유예합니다.
+햇빛·자동 노출 변화는 전역 밝기 이동 비율(`shiftRatio`)로 구분해 장면 전환에서 제외합니다.
+
+> 현재 검증 영상(41.8초)에는 실제 위험 상황이 없어 SAFE 구간만 표시됩니다.
+> CAUTION·DANGER 경고 경로 검증은 위험 상황 영상 확보 후 진행할 예정입니다.
+
+상세한 계측 결과와 개선 과정은 [Development Log](docs/devlog.md)와 [Troubleshooting](docs/troubleshooting.md)에 정리했습니다.
 
 ## 요약
 
@@ -413,10 +421,3 @@ LEAD 연속성과 성능 지표는 계측 체계가 갖춰졌습니다. 남은 �
 - Re-ID 특징을 이용한 장시간 객체 재식별
 - YOLOv8n / YOLOv8s, 입력 640 / 960 비교
 - 대형 차량·역광·부분 노출 데이터 파인튜닝
-
----
-
-## 문서
-
-- [Development Log](docs/devlog.md) — 개발 순서, 각 판단의 근거, 계측 결과
-- [Troubleshooting](docs/troubleshooting.md) — 문제별 원인 분석과 수정 과정
