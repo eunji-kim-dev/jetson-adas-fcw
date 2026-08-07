@@ -1034,6 +1034,9 @@ int main(int argc, char* argv[]) {
     cv::Mat frame;
     int processedFrames = 0;
     double totalInferenceMilliseconds = 0.0;
+    double totalFullYoloMilliseconds = 0.0;
+    double totalFarYoloMilliseconds = 0.0;
+    double totalPostprocessMilliseconds = 0.0;
 
     const auto totalStart = std::chrono::steady_clock::now();
 
@@ -1088,62 +1091,97 @@ int main(int argc, char* argv[]) {
 
         const bool riskAnalysisEnabled = sceneWarmupRemaining <= 0;
 
-        const auto inferenceStart = std::chrono::steady_clock::now();
+  const auto inferenceStart = std::chrono::steady_clock::now();
 
-        std::vector<Detection> detections;
+std::vector<Detection> detections;
 
-        try {
-            // 기본 YOLO 검출
-            // 전체 블랙박스 프레임에서 먼저 객체를 검출
-            detections = detectObjects(net, frame, detectorThreshold, nmsThreshold);
+double fullYoloMilliseconds = 0.0;
+double farYoloMilliseconds = 0.0;
+double postprocessMilliseconds = 0.0;
 
-            // 동영상 13초 차량 미검출 오류 수정
-            // 전체 프레임에서는 너무 작아진 원거리 차량을
-            // 중앙 도로 crop 영역에서 한 번 더 확대 추론
-            const std::vector<Detection> farDetections =
-                detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
+    try {
+        // 1. 전체 프레임 YOLO
+        const auto fullYoloStart = std::chrono::steady_clock::now();
 
-            // 전체 프레임 검출 + 원거리 crop 검출을 합침
-            detections.insert(
-                detections.end(), farDetections.begin(), farDetections.end()
-            );
+        detections = detectObjects(net, frame, detectorThreshold, nmsThreshold);
 
-            // 두 추론에서 같은 차량이 각각 검출될 수 있으므로
-            // 합쳐진 결과에 클래스 그룹별 NMS를 다시 적용
-            detections = applyGroupedNms(detections, nmsThreshold);
+        const auto fullYoloEnd = std::chrono::steady_clock::now();
 
-            // 동영상 17초 ID:29 큰 박스 오류 수정
-            // IoU NMS로 제거되지 않는 부분 포함형/납작한 큰 박스를
-            // containment + 중심 포함 + 종횡비 조건으로 한 번 더 제거
-            detections = suppressContainedDuplicates(detections);
+        fullYoloMilliseconds = std::chrono::duration<double, std::milli>(
+            fullYoloEnd - fullYoloStart
+        ).count();
 
-            // 동영상 38초 ID:60 오검출 수정
-            // 높이 4~5px 수준의 극소 박스가 Track으로 확정되는 것을 방지
-            const int minimumDetectionHeight =
-                std::max(8, static_cast<int>(std::round(height * 0.014)));
+        // 2. 원거리 crop YOLO
+        const auto farYoloStart = std::chrono::steady_clock::now();
 
-            detections.erase(
-                std::remove_if(
-                    detections.begin(), detections.end(),
-                    [&](const Detection& detection) {
-                        return detection.box.height < minimumDetectionHeight;
-                    }
-                ),
-                detections.end()
-            );
-        } catch (const std::exception& error) {
-            std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
-            return 1;
-        }
+        const std::vector<Detection> farDetections =
+            detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
 
-        const auto inferenceEnd = std::chrono::steady_clock::now();
+        const auto farYoloEnd = std::chrono::steady_clock::now();
 
-        const double inferenceMilliseconds =
-            std::chrono::duration<double, std::milli>(
-                inferenceEnd - inferenceStart
-            ).count();
+        farYoloMilliseconds = std::chrono::duration<double, std::milli>(
+            farYoloEnd - farYoloStart
+        ).count();
 
-        totalInferenceMilliseconds += inferenceMilliseconds;
+        // 3. 후처리
+        const auto postprocessStart = std::chrono::steady_clock::now();
+
+        // 전체 프레임 + 원거리 crop 검출 결과 병합
+        detections.insert(detections.end(), farDetections.begin(), farDetections.end());
+
+        // 그룹별 NMS
+        detections = applyGroupedNms(detections, nmsThreshold);
+
+        // 포함형 / 비정상 중복 박스 제거
+        detections = suppressContainedDuplicates(detections);
+
+        // 극소 박스 제거
+        const int minimumDetectionHeight =
+            std::max(8, static_cast<int>(std::round(height * 0.014)));
+
+        detections.erase(
+            std::remove_if(
+                detections.begin(), detections.end(),
+                [&](const Detection& detection) {
+                    return detection.box.height < minimumDetectionHeight;
+                }
+            ),
+            detections.end()
+        );
+
+        const auto postprocessEnd = std::chrono::steady_clock::now();
+
+        postprocessMilliseconds = std::chrono::duration<double, std::milli>(
+            postprocessEnd - postprocessStart
+        ).count();
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
+        return 1;
+    }
+
+    const auto inferenceEnd = std::chrono::steady_clock::now();
+
+    const double inferenceMilliseconds = std::chrono::duration<double, std::milli>(
+        inferenceEnd - inferenceStart
+    ).count();
+
+    // 누적
+    totalInferenceMilliseconds += inferenceMilliseconds;
+    totalFullYoloMilliseconds += fullYoloMilliseconds;
+    totalFarYoloMilliseconds += farYoloMilliseconds;
+    totalPostprocessMilliseconds += postprocessMilliseconds;
+
+    // 콘솔 출력
+    const double averageMilliseconds =
+        totalInferenceMilliseconds / static_cast<double>(processedFrames);
+
+    std::cout << std::fixed << std::setprecision(2)
+            << "[PERF] frame=" << processedFrames
+            << " | Full YOLO=" << fullYoloMilliseconds << " ms"
+            << " | Far YOLO=" << farYoloMilliseconds << " ms"
+            << " | Post=" << postprocessMilliseconds << " ms"
+            << " | Total=" << inferenceMilliseconds << " ms"
+            << " | AVG=" << averageMilliseconds << " ms" << '\n';
 
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
 
