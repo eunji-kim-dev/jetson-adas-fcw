@@ -17,15 +17,12 @@
  * TTC-P는 실제 거리 센서로 계산한 TTC가 아니라
  * 영상 속 객체 크기 변화로 추정한 상대적인 TTC Proxy
  */
-
 #include "Detection.hpp"
 #include "MultiObjectTracker.hpp"
 #include "RiskAnalyzer.hpp"
-
 #include <opencv2/dnn.hpp>
 #include <opencv2/freetype.hpp>
 #include <opencv2/opencv.hpp>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -96,13 +93,7 @@ struct ObjectGeometry {
  */
 class SceneChangeDetector {
 public:
-    bool update(
-        const cv::Mat& frame,
-        float* meanAbsoluteDifference = nullptr,
-        float* histogramCorrelation = nullptr,
-        float* brightnessShiftRatio = nullptr,
-        float* brightnessCompensatedDifference = nullptr
-    ) {
+    bool update(const cv::Mat& frame, float* meanAbsoluteDifference = nullptr, float* histogramCorrelation = nullptr, float* brightnessShiftRatio = nullptr, float* brightnessCompensatedDifference = nullptr) {
         cv::Mat resized;
         cv::resize(frame, resized, cv::Size(320, 180));
 
@@ -115,12 +106,7 @@ public:
         const float range[] = {0.0F, 256.0F};
         const float* ranges[] = {range};
 
-        cv::calcHist(
-            &gray, 1, channels, cv::Mat(),
-            histogram, 1, histogramSize, ranges,
-            true, false
-        );
-
+        cv::calcHist(&gray, 1, channels, cv::Mat(), histogram, 1, histogramSize, ranges, true, false);
         cv::normalize(histogram, histogram, 1.0, 0.0, cv::NORM_L1);
 
         // 첫 프레임에는 비교 대상이 없으므로 현재 프레임만 저장하고 장면 전환은 아니라고 반환
@@ -128,21 +114,10 @@ public:
             previousGray_ = gray.clone();
             previousHistogram_ = histogram.clone();
 
-            if (meanAbsoluteDifference != nullptr) {
-                *meanAbsoluteDifference = 0.0F;
-            }
-
-            if (histogramCorrelation != nullptr) {
-                *histogramCorrelation = 1.0F;
-            }
-
-            if (brightnessShiftRatio != nullptr) {
-                *brightnessShiftRatio = 0.0F;
-            }
-
-            if (brightnessCompensatedDifference != nullptr) {
-                *brightnessCompensatedDifference = 0.0F;
-            }
+            if (meanAbsoluteDifference != nullptr) *meanAbsoluteDifference = 0.0F;
+            if (histogramCorrelation != nullptr) *histogramCorrelation = 1.0F;
+            if (brightnessShiftRatio != nullptr) *brightnessShiftRatio = 0.0F;
+            if (brightnessCompensatedDifference != nullptr) *brightnessCompensatedDifference = 0.0F;
 
             return false;
         }
@@ -151,10 +126,7 @@ public:
         cv::absdiff(gray, previousGray_, difference);
 
         const float frameDifference = static_cast<float>(cv::mean(difference)[0]);
-
-        const float correlation = static_cast<float>(
-            cv::compareHist(previousHistogram_, histogram, cv::HISTCMP_CORREL)
-        );
+        const float correlation = static_cast<float>(cv::compareHist(previousHistogram_, histogram, cv::HISTCMP_CORREL));
 
         // 동영상 13초 햇빛/자동 노출 오검출 수정
         // 현재 프레임과 이전 프레임의 평균 밝기 차이를 계산
@@ -164,14 +136,11 @@ public:
 
         // 전체 프레임 변화량 중
         // 화면 전체가 균일하게 밝아지거나 어두워진 성분의 비율
-        const float shiftRatio =
-            std::abs(meanShift) / std::max(frameDifference, 1e-3F);
+        const float shiftRatio = std::abs(meanShift) / std::max(frameDifference, 1e-3F);
 
         // 전역 밝기 이동(meanShift)을 제거한 뒤에도
         // 실제 구조 변화가 얼마나 남아 있는지 계산
-        cv::Mat currentFloat;
-        cv::Mat previousFloat;
-
+        cv::Mat currentFloat, previousFloat;
         gray.convertTo(currentFloat, CV_32F);
         previousGray_.convertTo(previousFloat, CV_32F);
 
@@ -181,24 +150,12 @@ public:
         cv::Mat compensatedAbsolute;
         cv::absdiff(compensatedDifferenceImage, cv::Scalar::all(0), compensatedAbsolute);
 
-        const float compensatedDifference =
-            static_cast<float>(cv::mean(compensatedAbsolute)[0]);
+        const float compensatedDifference = static_cast<float>(cv::mean(compensatedAbsolute)[0]);
 
-        if (meanAbsoluteDifference != nullptr) {
-            *meanAbsoluteDifference = frameDifference;
-        }
-
-        if (histogramCorrelation != nullptr) {
-            *histogramCorrelation = correlation;
-        }
-
-        if (brightnessShiftRatio != nullptr) {
-            *brightnessShiftRatio = shiftRatio;
-        }
-
-        if (brightnessCompensatedDifference != nullptr) {
-            *brightnessCompensatedDifference = compensatedDifference;
-        }
+        if (meanAbsoluteDifference != nullptr) *meanAbsoluteDifference = frameDifference;
+        if (histogramCorrelation != nullptr) *histogramCorrelation = correlation;
+        if (brightnessShiftRatio != nullptr) *brightnessShiftRatio = shiftRatio;
+        if (brightnessCompensatedDifference != nullptr) *brightnessCompensatedDifference = compensatedDifference;
 
         /*
          * 동영상 전체 프레임 재측정 결과:
@@ -214,11 +171,10 @@ public:
         constexpr float maximumExposureShiftRatio = 0.50F;
         constexpr float compensatedDiffThreshold = diffThreshold * 0.80F;
 
-        const bool sceneChanged =
-            frameDifference >= diffThreshold &&
-            correlation <= histogramThreshold &&
-            shiftRatio < maximumExposureShiftRatio &&
-            compensatedDifference >= compensatedDiffThreshold;
+        const bool sceneChanged = frameDifference >= diffThreshold &&
+                                  correlation <= histogramThreshold &&
+                                  shiftRatio < maximumExposureShiftRatio &&
+                                  compensatedDifference >= compensatedDiffThreshold;
 
         previousGray_ = gray.clone();
         previousHistogram_ = histogram.clone();
@@ -242,9 +198,7 @@ public:
         std::vector<std::string> fontCandidates;
 
         if (const char* customFont = std::getenv("ADAS_KOREAN_FONT")) {
-            if (*customFont != '\0') {
-                fontCandidates.emplace_back(customFont);
-            }
+            if (*customFont != '\0') fontCandidates.emplace_back(customFont);
         }
 
         fontCandidates.emplace_back("/usr/share/fonts/truetype/nanum/NanumGothic.ttf");
@@ -253,10 +207,7 @@ public:
         fontCandidates.emplace_back("/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf");
 
         for (const std::string& fontPath : fontCandidates) {
-            if (!std::filesystem::exists(fontPath)) {
-                continue;
-            }
-
+            if (!std::filesystem::exists(fontPath)) continue;
             try {
                 renderer_ = cv::freetype::createFreeType2();
                 renderer_->loadFontData(fontPath, 0);
@@ -266,35 +217,18 @@ public:
                 renderer_.release();
             }
         }
-
         return false;
     }
 
-    void putText(
-        cv::Mat& image,
-        const std::string& text,
-        const cv::Point& origin,
-        int fontHeight,
-        const cv::Scalar& color,
-        int thickness = -1
-    ) const {
-        renderer_->putText(
-            image, text, origin, fontHeight, color, thickness, cv::LINE_AA, false
-        );
+    void putText(cv::Mat& image, const std::string& text, const cv::Point& origin, int fontHeight, const cv::Scalar& color, int thickness = -1) const {
+        renderer_->putText(image, text, origin, fontHeight, color, thickness, cv::LINE_AA, false);
     }
 
-    cv::Size getTextSize(
-        const std::string& text,
-        int fontHeight,
-        int thickness,
-        int* baseline
-    ) const {
+    cv::Size getTextSize(const std::string& text, int fontHeight, int thickness, int* baseline) const {
         return renderer_->getTextSize(text, fontHeight, thickness, baseline);
     }
 
-    const std::string& fontPath() const {
-        return fontPath_;
-    }
+    const std::string& fontPath() const { return fontPath_; }
 
 private:
     cv::Ptr<cv::freetype::FreeType2> renderer_;
@@ -302,8 +236,7 @@ private:
 };
 
 bool isTargetClass(int classId) {
-    return classId == 0 || classId == 1 || classId == 2 ||
-           classId == 3 || classId == 5 || classId == 7;
+    return classId == 0 || classId == 1 || classId == 2 || classId == 3 || classId == 5 || classId == 7;
 }
 
 bool isVehicleClass(int classId) {
@@ -328,99 +261,52 @@ std::string getRiskNameKorean(RiskLevel level) {
         case RiskLevel::Caution: return "주의";
         case RiskLevel::Danger: return "위험";
     }
-
     return "알 수 없음";
 }
 
 int getNmsGroup(int classId) {
-    if (classId == 2 || classId == 5 || classId == 7) {
-        return 0;
-    }
-
-    if (classId == 1 || classId == 3) {
-        return 1;
-    }
-
-    if (classId == 0) {
-        return 2;
-    }
-
+    if (classId == 2 || classId == 5 || classId == 7) return 0;
+    if (classId == 1 || classId == 3) return 1;
+    if (classId == 0) return 2;
     return classId + 10;
 }
 
 LetterboxResult letterbox(const cv::Mat& frame, int inputSize) {
-    const float scale = std::min(
-        static_cast<float>(inputSize) / static_cast<float>(frame.cols),
-        static_cast<float>(inputSize) / static_cast<float>(frame.rows)
-    );
-
-    const int resizedWidth =
-        static_cast<int>(std::round(static_cast<float>(frame.cols) * scale));
-
-    const int resizedHeight =
-        static_cast<int>(std::round(static_cast<float>(frame.rows) * scale));
+    const float scale = std::min(static_cast<float>(inputSize) / static_cast<float>(frame.cols), static_cast<float>(inputSize) / static_cast<float>(frame.rows));
+    const int resizedWidth = static_cast<int>(std::round(static_cast<float>(frame.cols) * scale));
+    const int resizedHeight = static_cast<int>(std::round(static_cast<float>(frame.rows) * scale));
 
     cv::Mat resized;
     cv::resize(frame, resized, cv::Size(resizedWidth, resizedHeight));
 
     const int totalPadX = inputSize - resizedWidth;
     const int totalPadY = inputSize - resizedHeight;
-
     const int padLeft = totalPadX / 2;
     const int padRight = totalPadX - padLeft;
     const int padTop = totalPadY / 2;
     const int padBottom = totalPadY - padTop;
 
     cv::Mat padded;
-    cv::copyMakeBorder(
-        resized, padded,
-        padTop, padBottom, padLeft, padRight,
-        cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114)
-    );
+    cv::copyMakeBorder(resized, padded, padTop, padBottom, padLeft, padRight, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
 
     return {padded, scale, padLeft, padTop};
 }
 
-LanePosition calculateLanePosition(
-    const std::vector<cv::Point>& trapezoid,
-    const cv::Point& point
-) {
-    if (trapezoid.size() != 4) {
-        return {};
-    }
+LanePosition calculateLanePosition(const std::vector<cv::Point>& trapezoid, const cv::Point& point) {
+    if (trapezoid.size() != 4) return {};
 
-    const float topY =
-        (static_cast<float>(trapezoid[0].y) + static_cast<float>(trapezoid[1].y)) / 2.0F;
-
-    const float bottomY =
-        (static_cast<float>(trapezoid[2].y) + static_cast<float>(trapezoid[3].y)) / 2.0F;
+    const float topY = (static_cast<float>(trapezoid[0].y) + static_cast<float>(trapezoid[1].y)) / 2.0F;
+    const float bottomY = (static_cast<float>(trapezoid[2].y) + static_cast<float>(trapezoid[3].y)) / 2.0F;
 
     // 화면 하단까지 내려온 가까운 차량은 bottomY 아래라고 차선 밖으로 버리지 않음
     // verticalRatio가 아래에서 1.0으로 clamp되므로 하단 경계 기준으로 판정 가능
-    if (point.y < topY || bottomY <= topY) {
-        return {};
-    }
+    if (point.y < topY || bottomY <= topY) return {};
 
-    const float verticalRatio = std::clamp(
-        (static_cast<float>(point.y) - topY) / (bottomY - topY),
-        0.0F,
-        1.0F
-    );
+    const float verticalRatio = std::clamp((static_cast<float>(point.y) - topY) / (bottomY - topY), 0.0F, 1.0F);
+    const float leftX = static_cast<float>(trapezoid[0].x) + (static_cast<float>(trapezoid[3].x) - static_cast<float>(trapezoid[0].x)) * verticalRatio;
+    const float rightX = static_cast<float>(trapezoid[1].x) + (static_cast<float>(trapezoid[2].x) - static_cast<float>(trapezoid[1].x)) * verticalRatio;
 
-    const float leftX =
-        static_cast<float>(trapezoid[0].x) +
-        (static_cast<float>(trapezoid[3].x) - static_cast<float>(trapezoid[0].x)) *
-            verticalRatio;
-
-    const float rightX =
-        static_cast<float>(trapezoid[1].x) +
-        (static_cast<float>(trapezoid[2].x) - static_cast<float>(trapezoid[1].x)) *
-            verticalRatio;
-
-    if (point.x < leftX || point.x > rightX || rightX <= leftX) {
-        return {};
-    }
-
+    if (point.x < leftX || point.x > rightX || rightX <= leftX) return {};
     return {true, (static_cast<float>(point.x) - leftX) / (rightX - leftX)};
 }
 
@@ -432,43 +318,23 @@ LanePosition calculateLanePosition(
  * 이 함수는 해당 형태와 위치 조건을 만족하는 큰 우측 train 후보만
  * truck(7)으로 변경한 뒤 트래커에 전달
  */
-std::vector<Detection> detectObjects(
-    cv::dnn::Net& net,
-    const cv::Mat& frame,
-    float confidenceThreshold,
-    float nmsThreshold
-) {
+std::vector<Detection> detectObjects(cv::dnn::Net& net, const cv::Mat& frame, float confidenceThreshold, float nmsThreshold) {
     constexpr int inputSize = 640;
-
     const LetterboxResult prepared = letterbox(frame, inputSize);
 
-    cv::Mat blob = cv::dnn::blobFromImage(
-        prepared.image,
-        1.0 / 255.0,
-        cv::Size(inputSize, inputSize),
-        cv::Scalar(),
-        true,
-        false
-    );
-
+    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, cv::Size(inputSize, inputSize), cv::Scalar(), true, false);
     net.setInput(blob);
     cv::Mat output = net.forward();
 
-    if (output.dims != 3) {
-        throw std::runtime_error("지원하지 않는 YOLO 출력 차원");
-    }
+    if (output.dims != 3) throw std::runtime_error("지원하지 않는 YOLO 출력 차원");
 
     const int firstDimension = output.size[1];
     const int secondDimension = output.size[2];
-
     cv::Mat predictions(firstDimension, secondDimension, CV_32F, output.ptr<float>());
-
-    if (firstDimension < secondDimension) {
-        predictions = predictions.t();
-    }
+    
+    if (firstDimension < secondDimension) predictions = predictions.t();
 
     std::vector<cv::Rect> boxes;
-
     /*
      * confidences는 실제 화면 표시와 트래커 전달용 점수
      * nmsScores는 중복 박스 제거 우선순위에만 사용하는 점수
@@ -477,58 +343,34 @@ std::vector<Detection> detectObjects(
      * NMS에서는 원래 강한 객체 점수를 사용해 작은 car 박스에
      * 큰 탱크로리 박스가 밀리지 않게 함
      */
-    std::vector<float> confidences;
-    std::vector<float> nmsScores;
+    std::vector<float> confidences, nmsScores;
     std::vector<int> classIds;
 
     for (int row = 0; row < predictions.rows; ++row) {
         const float* data = predictions.ptr<float>(row);
+        const float centerX = data[0], centerY = data[1], boxWidth = data[2], boxHeight = data[3];
 
-        const float centerX = data[0];
-        const float centerY = data[1];
-        const float boxWidth = data[2];
-        const float boxHeight = data[3];
-
-        cv::Mat classScores(
-            1, predictions.cols - 4, CV_32F, const_cast<float*>(data + 4)
-        );
-
+        cv::Mat classScores(1, predictions.cols - 4, CV_32F, const_cast<float*>(data + 4));
         cv::Point bestClassPoint;
         double bestClassScore = 0.0;
-
         cv::minMaxLoc(classScores, nullptr, &bestClassScore, nullptr, &bestClassPoint);
 
         const int rawClassId = bestClassPoint.x;
         const float rawConfidence = static_cast<float>(bestClassScore);
 
-        if (rawConfidence < confidenceThreshold) {
-            continue;
-        }
+        if (rawConfidence < confidenceThreshold) continue;
 
-        int left = static_cast<int>(std::round(
-            (centerX - boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale
-        ));
-
-        int top = static_cast<int>(std::round(
-            (centerY - boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale
-        ));
-
-        int right = static_cast<int>(std::round(
-            (centerX + boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale
-        ));
-
-        int bottom = static_cast<int>(std::round(
-            (centerY + boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale
-        ));
+        int left = static_cast<int>(std::round((centerX - boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale));
+        int top = static_cast<int>(std::round((centerY - boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale));
+        int right = static_cast<int>(std::round((centerX + boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale));
+        int bottom = static_cast<int>(std::round((centerY + boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale));
 
         left = std::clamp(left, 0, frame.cols - 1);
         top = std::clamp(top, 0, frame.rows - 1);
         right = std::clamp(right, 0, frame.cols - 1);
         bottom = std::clamp(bottom, 0, frame.rows - 1);
 
-        if (right <= left || bottom <= top) {
-            continue;
-        }
+        if (right <= left || bottom <= top) continue;
 
         const int restoredWidth = right - left;
         const int restoredHeight = bottom - top;
@@ -542,29 +384,20 @@ std::vector<Detection> detectObjects(
          * 프레임별 박스 흔들림 때문에 조건이 끊기는 것을 줄임
          * 모든 train을 바꾸는 것이 아니라 우측의 큰 도로 객체만 복구
          */
-        const bool isRightTankerMisclassifiedAsTrain =
-            rawClassId == 6 &&
-            rawConfidence >= 0.20F &&
+        const bool isRightTankerMisclassifiedAsTrain = 
+            rawClassId == 6 && rawConfidence >= 0.20F &&
             left >= static_cast<int>(frame.cols * 0.45F) &&
             restoredCenterX >= static_cast<int>(frame.cols * 0.60F) &&
             right >= static_cast<int>(frame.cols * 0.76F) &&
             restoredWidth >= static_cast<int>(frame.cols * 0.18F) &&
             restoredHeight >= static_cast<int>(frame.rows * 0.20F) &&
-            restoredArea >= static_cast<int>(
-                static_cast<float>(frame.cols * frame.rows) * 0.055F
-            ) &&
+            restoredArea >= static_cast<int>(static_cast<float>(frame.cols * frame.rows) * 0.055F) &&
             bottom >= static_cast<int>(frame.rows * 0.62F);
 
         const int finalClassId = isRightTankerMisclassifiedAsTrain ? 7 : rawClassId;
+        if (!isTargetClass(finalClassId)) continue;
 
-        if (!isTargetClass(finalClassId)) {
-            continue;
-        }
-
-        const float displayConfidence =
-            isRightTankerMisclassifiedAsTrain
-                ? std::clamp(rawConfidence * 0.55F, 0.25F, 0.49F)
-                : rawConfidence;
+        const float displayConfidence = isRightTankerMisclassifiedAsTrain ? std::clamp(rawConfidence * 0.55F, 0.25F, 0.49F) : rawConfidence;
 
         boxes.emplace_back(left, top, restoredWidth, restoredHeight);
         confidences.push_back(displayConfidence);
@@ -573,16 +406,13 @@ std::vector<Detection> detectObjects(
     }
 
     std::map<int, std::vector<int>> indicesByGroup;
-
     for (int index = 0; index < static_cast<int>(classIds.size()); ++index) {
         indicesByGroup[getNmsGroup(classIds[index])].push_back(index);
     }
 
     std::vector<Detection> detections;
-
     for (const auto& groupEntry : indicesByGroup) {
         const std::vector<int>& globalIndices = groupEntry.second;
-
         std::vector<cv::Rect> groupBoxes;
         std::vector<float> groupNmsScores;
 
@@ -592,19 +422,11 @@ std::vector<Detection> detectObjects(
         }
 
         std::vector<int> keptIndices;
-
-        cv::dnn::NMSBoxes(
-            groupBoxes, groupNmsScores, confidenceThreshold, nmsThreshold, keptIndices
-        );
+        cv::dnn::NMSBoxes(groupBoxes, groupNmsScores, confidenceThreshold, nmsThreshold, keptIndices);
 
         for (const int localIndex : keptIndices) {
             const int globalIndex = globalIndices[localIndex];
-
-            detections.push_back({
-                classIds[globalIndex],
-                confidences[globalIndex],
-                boxes[globalIndex]
-            });
+            detections.push_back({classIds[globalIndex], confidences[globalIndex], boxes[globalIndex]});
         }
     }
 
@@ -622,12 +444,7 @@ std::vector<Detection> detectObjects(
  *
  * crop에서 나온 좌표는 다시 원본 프레임 좌표로 복원
  */
-std::vector<Detection> detectFarRoadObjects(
-    cv::dnn::Net& net,
-    const cv::Mat& frame,
-    float confidenceThreshold,
-    float nmsThreshold
-) {
+std::vector<Detection> detectFarRoadObjects(cv::dnn::Net& net, const cv::Mat& frame, float confidenceThreshold, float nmsThreshold) {
     const int cropX = static_cast<int>(std::round(frame.cols * 0.25F));
     const int cropY = static_cast<int>(std::round(frame.rows * 0.38F));
     const int cropWidth = static_cast<int>(std::round(frame.cols * 0.50F));
@@ -635,39 +452,29 @@ std::vector<Detection> detectFarRoadObjects(
 
     const int safeX = std::clamp(cropX, 0, frame.cols - 1);
     const int safeY = std::clamp(cropY, 0, frame.rows - 1);
-
     const int safeWidth = std::min(cropWidth, frame.cols - safeX);
     const int safeHeight = std::min(cropHeight, frame.rows - safeY);
 
-    if (safeWidth <= 1 || safeHeight <= 1) {
-        return {};
-    }
+    if (safeWidth <= 1 || safeHeight <= 1) return {};
 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
     const cv::Mat crop = frame(cropRect).clone();
 
-    std::vector<Detection> cropDetections =
-        detectObjects(net, crop, confidenceThreshold, nmsThreshold);
-
+    std::vector<Detection> cropDetections = detectObjects(net, crop, confidenceThreshold, nmsThreshold);
     std::vector<Detection> result;
 
     for (Detection detection : cropDetections) {
         // 동영상 38초 ID:60 오검출 수정
         // crop은 원거리 차량 보조 검출용이라 너무 낮은 confidence 후보는 제외
-        if (detection.confidence < 0.20F) {
-            continue;
-        }
-
+        if (detection.confidence < 0.20F) continue;
+        
         // 원거리 보조 추론에서는 차량 계열만 사용
         // person 등까지 중복 추론해서 오검출이 늘어나는 것을 줄임
-        if (!isVehicleClass(detection.classId)) {
-            continue;
-        }
+        if (!isVehicleClass(detection.classId)) continue;
 
         // crop 내부 좌표를 원본 영상 좌표로 복원
         detection.box.x += cropRect.x;
         detection.box.y += cropRect.y;
-
         result.push_back(detection);
     }
 
@@ -682,21 +489,15 @@ std::vector<Detection> detectFarRoadObjects(
  * car/bus/truck, bicycle/motorcycle, person 그룹으로 다시 묶고
  * IoU 기반 NMS를 한 번 더 수행
  */
-std::vector<Detection> applyGroupedNms(
-    const std::vector<Detection>& input,
-    float nmsThreshold
-) {
+std::vector<Detection> applyGroupedNms(const std::vector<Detection>& input, float nmsThreshold) {
     std::map<int, std::vector<int>> indicesByGroup;
-
     for (int index = 0; index < static_cast<int>(input.size()); ++index) {
         indicesByGroup[getNmsGroup(input[index].classId)].push_back(index);
     }
 
     std::vector<Detection> result;
-
     for (const auto& groupEntry : indicesByGroup) {
         const std::vector<int>& globalIndices = groupEntry.second;
-
         std::vector<cv::Rect> groupBoxes;
         std::vector<float> groupScores;
 
@@ -712,7 +513,6 @@ std::vector<Detection> applyGroupedNms(
             result.push_back(input[globalIndices[localIndex]]);
         }
     }
-
     return result;
 }
 
@@ -726,10 +526,7 @@ std::vector<Detection> applyGroupedNms(
 float calculateContainment(const cv::Rect& first, const cv::Rect& second) {
     const cv::Rect intersection = first & second;
     const float intersectionArea = static_cast<float>(intersection.area());
-
-    if (intersectionArea <= 0.0F) {
-        return 0.0F;
-    }
+    if (intersectionArea <= 0.0F) return 0.0F;
 
     const float firstArea = static_cast<float>(first.area());
     const float secondArea = static_cast<float>(second.area());
@@ -767,113 +564,66 @@ std::vector<Detection> suppressContainedDuplicates(const std::vector<Detection>&
     std::vector<bool> removed(input.size(), false);
 
     for (std::size_t i = 0; i < input.size(); ++i) {
-        if (removed[i]) {
-            continue;
-        }
-
+        if (removed[i]) continue;
         for (std::size_t j = i + 1; j < input.size(); ++j) {
-            if (removed[j]) {
-                continue;
-            }
+            if (removed[j]) continue;
 
             // 이 추가 필터는 차량 박스에만 적용
             // 보행자/이륜차의 정상적인 겹침에는 영향을 주지 않음
-            if (!isVehicleClass(input[i].classId) ||
-                !isVehicleClass(input[j].classId)) {
-                continue;
-            }
+            if (!isVehicleClass(input[i].classId) || !isVehicleClass(input[j].classId)) continue;
 
             // 같은 클래스만 비교하지 않고
             // car / bus / truck처럼 같은 NMS 그룹이면 비교
-            if (getNmsGroup(input[i].classId) != getNmsGroup(input[j].classId)) {
-                continue;
-            }
+            if (getNmsGroup(input[i].classId) != getNmsGroup(input[j].classId)) continue;
 
             const float containment = calculateContainment(input[i].box, input[j].box);
-
-            if (containment < looseContainment) {
-                continue;
-            }
+            if (containment < looseContainment) continue;
 
             const float firstArea = static_cast<float>(input[i].box.area());
             const float secondArea = static_cast<float>(input[j].box.area());
-
             const float smallerArea = std::max(std::min(firstArea, secondArea), 1.0F);
             const float largerArea = std::max(firstArea, secondArea);
             const float areaRatio = largerArea / smallerArea;
 
-            if (areaRatio < minimumAreaRatio) {
-                continue;
-            }
+            if (areaRatio < minimumAreaRatio) continue;
 
             const std::size_t smallerIndex = firstArea <= secondArea ? i : j;
             const std::size_t largerIndex = firstArea <= secondArea ? j : i;
 
             const cv::Rect& largerBox = input[largerIndex].box;
             const cv::Rect& smallerBox = input[smallerIndex].box;
-
-            const float largerAspect =
-                static_cast<float>(largerBox.width) /
-                std::max(static_cast<float>(largerBox.height), 1.0F);
-
-            const cv::Point smallerCenter(
-                smallerBox.x + smallerBox.width / 2,
-                smallerBox.y + smallerBox.height / 2
-            );
-
+            const float largerAspect = static_cast<float>(largerBox.width) / std::max(static_cast<float>(largerBox.height), 1.0F);
+            const cv::Point smallerCenter(smallerBox.x + smallerBox.width / 2, smallerBox.y + smallerBox.height / 2);
             const bool centerInside = largerBox.contains(smallerCenter);
 
             // 0.85 이상이면 강한 포함
             // 0.60~0.85 구간은
             // 작은 박스 중심이 안에 있고 큰 박스 형태가 비정상일 때만 허용
-            const bool contained =
-                containment >= strictContainment ||
-                (centerInside && largerAspect >= abnormalAspectRatio);
-
-            if (!contained) {
-                continue;
-            }
+            const bool contained = containment >= strictContainment || (centerInside && largerAspect >= abnormalAspectRatio);
+            if (!contained) continue;
 
             // 큰 박스 형태가 비정상적이면
             // confidence가 조금 높더라도 큰 박스를 우선 제거
-            if (largerAspect >= abnormalAspectRatio ||
-                input[largerIndex].confidence <=
-                    input[smallerIndex].confidence + largeBoxConfidenceMargin) {
+            if (largerAspect >= abnormalAspectRatio || input[largerIndex].confidence <= input[smallerIndex].confidence + largeBoxConfidenceMargin) {
                 removed[largerIndex] = true;
             } else {
                 removed[smallerIndex] = true;
             }
-
-            if (removed[i]) {
-                break;
-            }
+            if (removed[i]) break;
         }
     }
 
     std::vector<Detection> result;
-
     for (std::size_t index = 0; index < input.size(); ++index) {
-        if (!removed[index]) {
-            result.push_back(input[index]);
-        }
+        if (!removed[index]) result.push_back(input[index]);
     }
-
     return result;
 }
 
-void drawCenteredKoreanText(
-    KoreanTextRenderer& renderer,
-    cv::Mat& frame,
-    const std::string& text,
-    int y,
-    int fontHeight,
-    const cv::Scalar& color
-) {
+void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const std::string& text, int y, int fontHeight, const cv::Scalar& color) {
     int baseline = 0;
-
     const cv::Size textSize = renderer.getTextSize(text, fontHeight, -1, &baseline);
     const int x = std::max(0, (frame.cols - textSize.width) / 2);
-
     renderer.putText(frame, text, cv::Point(x, y), fontHeight, color, -1);
 }
 
@@ -890,18 +640,13 @@ int main(int argc, char* argv[]) {
     }
 
     KoreanTextRenderer koreanText;
-
     if (!koreanText.initialize()) {
-        std::cerr << "[ERROR] 한글 글꼴 탐색/로드 실패\n"
-                  << "필요한 패키지 설치 명령:\n"
-                  << "sudo apt install -y libopencv-contrib-dev fonts-nanum\n";
+        std::cerr << "[ERROR] 한글 글꼴 탐색/로드 실패\n필요한 패키지 설치 명령:\nsudo apt install -y libopencv-contrib-dev fonts-nanum\n";
         return 1;
     }
-
     std::cout << "[SUCCESS] 한글 글꼴: " << koreanText.fontPath() << '\n';
 
     cv::dnn::Net net;
-
     try {
         net = cv::dnn::readNetFromONNX(modelPath);
         net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
@@ -912,7 +657,6 @@ int main(int argc, char* argv[]) {
     }
 
     cv::VideoCapture capture(inputPath);
-
     if (!capture.isOpened()) {
         std::cerr << "[ERROR] 영상 열기 실패: " << inputPath << '\n';
         return 1;
@@ -920,20 +664,10 @@ int main(int argc, char* argv[]) {
 
     const int width = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_WIDTH));
     const int height = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
-
     double sourceFps = capture.get(cv::CAP_PROP_FPS);
+    if (sourceFps <= 0.0) sourceFps = 30.0;
 
-    if (sourceFps <= 0.0) {
-        sourceFps = 30.0;
-    }
-
-    cv::VideoWriter writer(
-        outputPath,
-        cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-        sourceFps,
-        cv::Size(width, height)
-    );
-
+    cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
     if (!writer.isOpened()) {
         std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
         return 1;
@@ -958,34 +692,25 @@ int main(int argc, char* argv[]) {
 
     constexpr float detectorThreshold = 0.10F;
     constexpr float nmsThreshold = 0.45F;
-
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
     RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60);
 
     int activeLeadId = -1;
-
     // 동영상 35초 길가 트럭이 잠깐 ego lane에 들어와 바로 LEAD가 되는 문제 방지
     std::unordered_map<int, int> egoLaneStreakById;
-
     // ego lane 경계를 한두 프레임 벗어나도 기존 분석 이력을 바로 지우지 않기 위한 유예
     std::unordered_map<int, int> egoLaneGraceById;
-
-    const int egoLaneGraceFrames =
-        std::max(3, static_cast<int>(std::round(sourceFps * 0.15)));
-
-    const int leadEligibilityFrames =
-        std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
+    
+    const int egoLaneGraceFrames = std::max(3, static_cast<int>(std::round(sourceFps * 0.15)));
+    const int leadEligibilityFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
 
     // 추월하면서 옆으로 빠지는 차량과 실제 정면 선행 차량을 구분하기 위한 횡방향 이력
     std::unordered_map<int, std::deque<float>> lateralHistoryById;
-
     constexpr std::size_t lateralHistorySize = 8;
     constexpr float maximumLateralDriftPerFrame = 0.02F;
-
     // 컷인 차량은 정의상 ego lane에 방금 들어온 차량이므로
     // 일반 LEAD의 0.5초 체류 조건보다 짧은 조건을 사용
-    const int cutInEligibilityFrames =
-        std::max(4, static_cast<int>(std::round(sourceFps * 0.15)));
+    const int cutInEligibilityFrames = std::max(4, static_cast<int>(std::round(sourceFps * 0.15)));
 
     /*
      * 경고가 한두 프레임 만에 사라져 깜빡이는 현상을 줄이기 위한
@@ -994,16 +719,12 @@ int main(int argc, char* argv[]) {
      * 기존 0.4초보다 조금 줄여 정상 상태로 돌아온 뒤
      * 오래 남아 보이지 않도록 0.25초로 조정
      */
-    const int warningHoldFrames =
-        std::max(1, static_cast<int>(std::round(sourceFps * 0.25)));
-
+    const int warningHoldFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.25)));
     // 시간 기반 위험 조건(샘플 수, 크기, 증가율, 접근 속도)은 RiskAnalyzer가 담당
     // main.cpp에는 화면 기하 조건만 남김
-    const int minimumLeadGroundYForWarning =
-        static_cast<int>(std::round(height * 0.60));
+    const int minimumLeadGroundYForWarning = static_cast<int>(std::round(height * 0.60));
 
-    int cautionHoldRemaining = 0;
-    int dangerHoldRemaining = 0;
+    int cautionHoldRemaining = 0, dangerHoldRemaining = 0;
 
     /*
      * RiskAnalyzer 자체의 안정화 외에도,
@@ -1016,9 +737,7 @@ int main(int argc, char* argv[]) {
      */
     constexpr int cautionConfirmationFrames = 8;
     constexpr int dangerConfirmationFrames = 3;
-
-    int cautionCandidateFrames = 0;
-    int dangerCandidateFrames = 0;
+    int cautionCandidateFrames = 0, dangerCandidateFrames = 0;
     int warningCandidateLeadId = -1;
 
     /*
@@ -1028,16 +747,13 @@ int main(int argc, char* argv[]) {
      * 이 시간 동안 RiskAnalyzer에는 모든 객체를
      * isLeadTarget=false로 전달해 기존 ID의 기록도 초기화
      */
-    const int sceneWarmupFrames =
-        std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
-
+    const int sceneWarmupFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
     int sceneWarmupRemaining = 0;
 
     SceneChangeDetector sceneChangeDetector;
-
     cv::Mat frame;
     int processedFrames = 0;
-    double totalInferenceMilliseconds = 0.0;
+    double totalInferenceMilliseconds = 0.0, totalFullYoloMilliseconds = 0.0, totalFarYoloMilliseconds = 0.0, totalPostprocessMilliseconds = 0.0;
 
     const auto totalStart = std::chrono::steady_clock::now();
 
@@ -1045,83 +761,58 @@ int main(int argc, char* argv[]) {
         ++processedFrames;
 
         // 반드시 ROI, 박스, 글씨를 그리기 전의 원본 프레임으로 장면 전환을 감지
-        float sceneDifference = 0.0F;
-        float sceneHistogramCorrelation = 1.0F;
-        float sceneShiftRatio = 0.0F;
-        float sceneCompensatedDifference = 0.0F;
-
-        const bool sceneChanged = sceneChangeDetector.update(
-            frame,
-            &sceneDifference,
-            &sceneHistogramCorrelation,
-            &sceneShiftRatio,
-            &sceneCompensatedDifference
-        );
+        float sceneDifference = 0.0F, sceneHistogramCorrelation = 1.0F, sceneShiftRatio = 0.0F, sceneCompensatedDifference = 0.0F;
+        const bool sceneChanged = sceneChangeDetector.update(frame, &sceneDifference, &sceneHistogramCorrelation, &sceneShiftRatio, &sceneCompensatedDifference);
 
         if (sceneChanged) {
             // 이전 장면에서 유지 중이던 경고를 즉시 제거
-            cautionHoldRemaining = 0;
-            dangerHoldRemaining = 0;
-
-            cautionCandidateFrames = 0;
-            dangerCandidateFrames = 0;
+            cautionHoldRemaining = 0; dangerHoldRemaining = 0;
+            cautionCandidateFrames = 0; dangerCandidateFrames = 0;
             warningCandidateLeadId = -1;
-
             activeLeadId = -1;
             sceneWarmupRemaining = sceneWarmupFrames;
 
             // 새 장면에서는 이전 장면의 lane 체류/횡이동 이력을 사용하지 않음
-            egoLaneStreakById.clear();
-            egoLaneGraceById.clear();
-            lateralHistoryById.clear();
-
+            egoLaneStreakById.clear(); egoLaneGraceById.clear(); lateralHistoryById.clear();
             // 이전 장면의 Kalman Track과 TTC-P 이력을 새 장면으로 넘기지 않음
             // nextTrackId_는 tracker.reset() 안에서 유지되어 ID는 실행 전체에서 유일함
-            tracker.reset();
-            riskAnalyzer.reset();
+            tracker.reset(); riskAnalyzer.reset();
 
-            std::cout << "[SCENE CHANGE] frame=" << processedFrames
-                      << " diff=" << std::fixed << std::setprecision(2) << sceneDifference
-                      << " histogram=" << sceneHistogramCorrelation
-                      << " shiftRatio=" << sceneShiftRatio
-                      << " compensatedDiff=" << sceneCompensatedDifference << '\n';
+            std::cout << "[SCENE CHANGE] frame=" << processedFrames << " diff=" << std::fixed << std::setprecision(2) << sceneDifference << " histogram=" << sceneHistogramCorrelation << " shiftRatio=" << sceneShiftRatio << " compensatedDiff=" << sceneCompensatedDifference << '\n';
         } else if (sceneDifference >= 20.0F && sceneShiftRatio >= 0.50F) {
             // 동영상 13초/17초 햇빛 변화 트러블슈팅 확인용 로그
             // rawDiff는 크지만 shiftRatio가 0.50 이상이면
             // 실제 컷이 아니라 전역 밝기/자동 노출 변화로 걸러진 상태
-            std::cout << "[EXPOSURE CHANGE] frame=" << processedFrames
-                      << " diff=" << std::fixed << std::setprecision(2) << sceneDifference
-                      << " histogram=" << sceneHistogramCorrelation
-                      << " shiftRatio=" << sceneShiftRatio
-                      << " compensatedDiff=" << sceneCompensatedDifference << '\n';
+            std::cout << "[EXPOSURE CHANGE] frame=" << processedFrames << " diff=" << std::fixed << std::setprecision(2) << sceneDifference << " histogram=" << sceneHistogramCorrelation << " shiftRatio=" << sceneShiftRatio << " compensatedDiff=" << sceneCompensatedDifference << '\n';
         }
 
         const bool riskAnalysisEnabled = sceneWarmupRemaining <= 0;
-
         const auto inferenceStart = std::chrono::steady_clock::now();
-
         std::vector<Detection> detections;
+        double fullYoloMilliseconds = 0.0, farYoloMilliseconds = 0.0, postprocessMilliseconds = 0.0;
 
         try {
             // 기본 YOLO 검출
             // 전체 블랙박스 프레임에서 먼저 객체를 검출
+            const auto fullYoloStart = std::chrono::steady_clock::now();
             detections = detectObjects(net, frame, detectorThreshold, nmsThreshold);
+            const auto fullYoloEnd = std::chrono::steady_clock::now();
+            fullYoloMilliseconds = std::chrono::duration<double, std::milli>(fullYoloEnd - fullYoloStart).count();
 
             // 동영상 13초 차량 미검출 오류 수정
             // 전체 프레임에서는 너무 작아진 원거리 차량을
             // 중앙 도로 crop 영역에서 한 번 더 확대 추론
-            const std::vector<Detection> farDetections =
-                detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
+            const auto farYoloStart = std::chrono::steady_clock::now();
+            const std::vector<Detection> farDetections = detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
+            const auto farYoloEnd = std::chrono::steady_clock::now();
+            farYoloMilliseconds = std::chrono::duration<double, std::milli>(farYoloEnd - farYoloStart).count();
 
+            const auto postprocessStart = std::chrono::steady_clock::now();
             // 전체 프레임 검출 + 원거리 crop 검출을 합침
-            detections.insert(
-                detections.end(), farDetections.begin(), farDetections.end()
-            );
-
+            detections.insert(detections.end(), farDetections.begin(), farDetections.end());
             // 두 추론에서 같은 차량이 각각 검출될 수 있으므로
             // 합쳐진 결과에 클래스 그룹별 NMS를 다시 적용
             detections = applyGroupedNms(detections, nmsThreshold);
-
             // 동영상 17초 ID:29 큰 박스 오류 수정
             // IoU NMS로 제거되지 않는 부분 포함형/납작한 큰 박스를
             // containment + 중심 포함 + 종횡비 조건으로 한 번 더 제거
@@ -1129,37 +820,31 @@ int main(int argc, char* argv[]) {
 
             // 동영상 38초 ID:60 오검출 수정
             // 높이 4~5px 수준의 극소 박스가 Track으로 확정되는 것을 방지
-            const int minimumDetectionHeight =
-                std::max(8, static_cast<int>(std::round(height * 0.014)));
+            const int minimumDetectionHeight = std::max(8, static_cast<int>(std::round(height * 0.014)));
+            detections.erase(std::remove_if(detections.begin(), detections.end(), [&](const Detection& detection) {
+                return detection.box.height < minimumDetectionHeight;
+            }), detections.end());
 
-            detections.erase(
-                std::remove_if(
-                    detections.begin(), detections.end(),
-                    [&](const Detection& detection) {
-                        return detection.box.height < minimumDetectionHeight;
-                    }
-                ),
-                detections.end()
-            );
+            const auto postprocessEnd = std::chrono::steady_clock::now();
+            postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - postprocessStart).count();
         } catch (const std::exception& error) {
             std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
             return 1;
         }
 
         const auto inferenceEnd = std::chrono::steady_clock::now();
-
-        const double inferenceMilliseconds =
-            std::chrono::duration<double, std::milli>(
-                inferenceEnd - inferenceStart
-            ).count();
-
+        const double inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - inferenceStart).count();
         totalInferenceMilliseconds += inferenceMilliseconds;
+        totalFullYoloMilliseconds += fullYoloMilliseconds;
+        totalFarYoloMilliseconds += farYoloMilliseconds;
+        totalPostprocessMilliseconds += postprocessMilliseconds;
+
+        const double averageInferenceMilliseconds = totalInferenceMilliseconds / static_cast<double>(processedFrames);
+        std::cout << std::fixed << std::setprecision(2) << "[PERF] frame=" << processedFrames << " | Full YOLO=" << fullYoloMilliseconds << " ms" << " | Far YOLO=" << farYoloMilliseconds << " ms" << " | Post=" << postprocessMilliseconds << " ms" << " | Total=" << inferenceMilliseconds << " ms" << " | AVG=" << averageInferenceMilliseconds << " ms\n";
 
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
-
         std::unordered_map<int, ObjectGeometry> geometryById;
         std::unordered_map<int, float> leadScoreById;
-
         int proposedLeadId = -1;
         float proposedLeadScore = -std::numeric_limits<float>::infinity();
 
@@ -1167,14 +852,9 @@ int main(int argc, char* argv[]) {
         // 내 차선에서 가장 가까운 선행 차량 후보를 선택
         for (const TrackedObject& trackedObject : trackedObjects) {
             const cv::Rect& box = trackedObject.box;
-
             const cv::Point groundPoint(box.x + box.width / 2, box.y + box.height);
-
-            const bool insideRoad =
-                cv::pointPolygonTest(roadRoi, groundPoint, false) >= 0.0;
-
-            const LanePosition lanePosition =
-                calculateLanePosition(egoLaneRoi, groundPoint);
+            const bool insideRoad = cv::pointPolygonTest(roadRoi, groundPoint, false) >= 0.0;
+            const LanePosition lanePosition = calculateLanePosition(egoLaneRoi, groundPoint);
 
             // 새 LEAD 진입 조건은 엄격하게 유지하되,
             // 이미 lane 안에 있던 차량이 경계를 잠깐 넘는 경우 이력은 유예 기간 동안 보존
@@ -1191,50 +871,32 @@ int main(int argc, char* argv[]) {
             }
 
             const bool laneHeld = lanePosition.inside || laneGrace > 0;
-
             // lane 중앙에서 바깥쪽으로 이동하면 passing-by,
             // 반대로 중앙으로 빠르게 접근하면 cutting-in으로 판단
             auto& lateralHistory = lateralHistoryById[trackedObject.trackId];
 
             if (lanePosition.inside) {
                 lateralHistory.push_back(lanePosition.normalizedX);
-
-                if (lateralHistory.size() > lateralHistorySize) {
-                    lateralHistory.pop_front();
-                }
+                if (lateralHistory.size() > lateralHistorySize) lateralHistory.pop_front();
             } else if (!laneHeld) {
                 lateralHistory.clear();
             }
 
             float outwardDriftPerFrame = 0.0F;
-
             if (lateralHistory.size() >= 4) {
                 const float pastOffset = std::abs(lateralHistory.front() - 0.5F);
                 const float recentOffset = std::abs(lateralHistory.back() - 0.5F);
-
-                outwardDriftPerFrame = (recentOffset - pastOffset) /
-                                       static_cast<float>(lateralHistory.size() - 1);
+                outwardDriftPerFrame = (recentOffset - pastOffset) / static_cast<float>(lateralHistory.size() - 1);
             }
 
-            const bool passingBy =
-                outwardDriftPerFrame > maximumLateralDriftPerFrame;
-
-            const bool cuttingIn =
-                outwardDriftPerFrame < -maximumLateralDriftPerFrame;
-
-            const int requiredStreak =
-                cuttingIn ? cutInEligibilityFrames : leadEligibilityFrames;
-
+            const bool passingBy = outwardDriftPerFrame > maximumLateralDriftPerFrame;
+            const bool cuttingIn = outwardDriftPerFrame < -maximumLateralDriftPerFrame;
+            const int requiredStreak = cuttingIn ? cutInEligibilityFrames : leadEligibilityFrames;
             float leadScore = -std::numeric_limits<float>::infinity();
 
-            if (lanePosition.inside &&
-                isVehicleClass(trackedObject.classId) &&
-                laneStreak >= requiredStreak) {
-                const float centerPenalty =
-                    std::abs(lanePosition.normalizedX - 0.5F) * 90.0F;
-
+            if (lanePosition.inside && isVehicleClass(trackedObject.classId) && laneStreak >= requiredStreak) {
+                const float centerPenalty = std::abs(lanePosition.normalizedX - 0.5F) * 90.0F;
                 leadScore = static_cast<float>(groundPoint.y) - centerPenalty;
-
                 leadScoreById[trackedObject.trackId] = leadScore;
 
                 if (leadScore > proposedLeadScore) {
@@ -1242,44 +904,21 @@ int main(int argc, char* argv[]) {
                     proposedLeadId = trackedObject.trackId;
                 }
             }
-
-            geometryById[trackedObject.trackId] = {
-                groundPoint,
-                insideRoad,
-                lanePosition.inside,
-                laneHeld,
-                lanePosition.normalizedX,
-                leadScore,
-                passingBy
-            };
+            geometryById[trackedObject.trackId] = {groundPoint, insideRoad, lanePosition.inside, laneHeld, lanePosition.normalizedX, leadScore, passingBy};
         }
 
         // 이번 프레임에 보이지 않는 Track의 lane 체류/횡이동 이력은 제거
-        for (auto iterator = egoLaneStreakById.begin();
-             iterator != egoLaneStreakById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) {
-                iterator = egoLaneStreakById.erase(iterator);
-            } else {
-                ++iterator;
-            }
+        for (auto iterator = egoLaneStreakById.begin(); iterator != egoLaneStreakById.end();) {
+            if (geometryById.find(iterator->first) == geometryById.end()) iterator = egoLaneStreakById.erase(iterator);
+            else ++iterator;
         }
-
-        for (auto iterator = egoLaneGraceById.begin();
-             iterator != egoLaneGraceById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) {
-                iterator = egoLaneGraceById.erase(iterator);
-            } else {
-                ++iterator;
-            }
+        for (auto iterator = egoLaneGraceById.begin(); iterator != egoLaneGraceById.end();) {
+            if (geometryById.find(iterator->first) == geometryById.end()) iterator = egoLaneGraceById.erase(iterator);
+            else ++iterator;
         }
-
-        for (auto iterator = lateralHistoryById.begin();
-             iterator != lateralHistoryById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) {
-                iterator = lateralHistoryById.erase(iterator);
-            } else {
-                ++iterator;
-            }
+        for (auto iterator = lateralHistoryById.begin(); iterator != lateralHistoryById.end();) {
+            if (geometryById.find(iterator->first) == geometryById.end()) iterator = lateralHistoryById.erase(iterator);
+            else ++iterator;
         }
 
         const auto activeLeadIterator = leadScoreById.find(activeLeadId);
@@ -1287,77 +926,40 @@ int main(int argc, char* argv[]) {
 
         // 장면 전환 직후에는 선행 차량을 바로 선택하지 않음
         // 새 장면에서 추적 정보가 다시 안정화된 뒤에만 선택
-        if (!riskAnalysisEnabled) {
-            activeLeadId = -1;
-        } else if (!activeLeadVisible) {
-            activeLeadId = proposedLeadId;
-        } else if (proposedLeadId >= 0 &&
-                   proposedLeadId != activeLeadId &&
-                   proposedLeadScore > activeLeadIterator->second + 35.0F) {
-            activeLeadId = proposedLeadId;
-        }
+        if (!riskAnalysisEnabled) activeLeadId = -1;
+        else if (!activeLeadVisible) activeLeadId = proposedLeadId;
+        else if (proposedLeadId >= 0 && proposedLeadId != activeLeadId && proposedLeadScore > activeLeadIterator->second + 35.0F) activeLeadId = proposedLeadId;
 
         cv::Mat overlay = frame.clone();
-
         cv::fillConvexPoly(overlay, roadRoi, cv::Scalar(0, 255, 0));
         cv::addWeighted(overlay, 0.10, frame, 0.90, 0.0, frame);
-
         cv::polylines(frame, roadRoi, true, cv::Scalar(0, 180, 0), 2);
         cv::polylines(frame, egoLaneRoi, true, cv::Scalar(255, 255, 255), 3);
 
-        int objectsOnRoad = 0;
-        int objectsInEgoLane = 0;
-
+        int objectsOnRoad = 0, objectsInEgoLane = 0;
         RiskResult leadRisk;
         bool leadRiskFound = false;
 
         for (const TrackedObject& trackedObject : trackedObjects) {
             const auto geometryIterator = geometryById.find(trackedObject.trackId);
-
-            if (geometryIterator == geometryById.end()) {
-                continue;
-            }
-
+            if (geometryIterator == geometryById.end()) continue;
             const ObjectGeometry& geometry = geometryIterator->second;
 
-            if (geometry.insideRoad) {
-                ++objectsOnRoad;
-            }
-
-            if (geometry.insideEgoLane) {
-                ++objectsInEgoLane;
-            }
+            if (geometry.insideRoad) ++objectsOnRoad;
+            if (geometry.insideEgoLane) ++objectsInEgoLane;
 
             // ego lane 차량은 LEAD가 되기 전부터 TTC-P 샘플을 축적한다.
             // 실제 CAUTION/DANGER 단계 판정은 activeLeadId 한 대에만 수행한다.
-            const bool isAnalysisTarget =
-                riskAnalysisEnabled &&
-                geometry.laneHeld &&
-                isVehicleClass(trackedObject.classId);
-
-            const bool isLeadTarget =
-                riskAnalysisEnabled &&
-                trackedObject.trackId == activeLeadId &&
-                geometry.laneHeld;
-
-            const RiskResult rawRisk =
-                riskAnalyzer.update(
-                    trackedObject,
-                    isAnalysisTarget,
-                    isLeadTarget,
-                    processedFrames
-                );
-
+            const bool isAnalysisTarget = riskAnalysisEnabled && geometry.laneHeld && isVehicleClass(trackedObject.classId);
+            const bool isLeadTarget = riskAnalysisEnabled && trackedObject.trackId == activeLeadId && geometry.laneHeld;
+            
+            const RiskResult rawRisk = riskAnalyzer.update(trackedObject, isAnalysisTarget, isLeadTarget, processedFrames);
+            
             // 시간 기반 조건은 RiskAnalyzer에서 이미 판단했으므로
             // main.cpp에서는 화면 위치와 passing-by 여부만 검사한다.
-            const bool geometryAllowsWarning =
-                isLeadTarget &&
-                (rawRisk.truncated ||
-                 geometry.groundPoint.y >= minimumLeadGroundYForWarning) &&
-                !geometry.passingBy;
+            const bool geometryAllowsWarning = isLeadTarget && (rawRisk.truncated || geometry.groundPoint.y >= minimumLeadGroundYForWarning) && !geometry.passingBy;
 
             RiskResult risk = rawRisk;
-
             if (risk.level != RiskLevel::Safe && !geometryAllowsWarning) {
                 risk.level = RiskLevel::Safe;
                 risk.valid = false;
@@ -1370,37 +972,22 @@ int main(int argc, char* argv[]) {
             }
 
             cv::Scalar boxColor;
-
-            if (!geometry.insideRoad) {
-                boxColor = cv::Scalar(0, 165, 255);
-            } else if (!geometry.insideEgoLane) {
-                boxColor = cv::Scalar(255, 255, 0);
-            } else if (!isLeadTarget) {
-                boxColor = cv::Scalar(255, 180, 0);
-            } else if (risk.level == RiskLevel::Danger) {
-                boxColor = cv::Scalar(0, 0, 255);
-            } else if (risk.level == RiskLevel::Caution) {
-                boxColor = cv::Scalar(0, 255, 255);
-            } else {
-                boxColor = cv::Scalar(0, 255, 0);
-            }
+            if (!geometry.insideRoad) boxColor = cv::Scalar(0, 165, 255);
+            else if (!geometry.insideEgoLane) boxColor = cv::Scalar(255, 255, 0);
+            else if (!isLeadTarget) boxColor = cv::Scalar(255, 180, 0);
+            else if (risk.level == RiskLevel::Danger) boxColor = cv::Scalar(0, 0, 255);
+            else if (risk.level == RiskLevel::Caution) boxColor = cv::Scalar(0, 255, 255);
+            else boxColor = cv::Scalar(0, 255, 0);
 
             cv::rectangle(frame, trackedObject.box, boxColor, 3);
             cv::circle(frame, geometry.groundPoint, 6, boxColor, -1);
 
-            std::string label =
-                getClassName(trackedObject.classId) +
-                " ID:" + std::to_string(trackedObject.trackId) +
-                " " + cv::format("%.2f", trackedObject.confidence);
+            std::string label = getClassName(trackedObject.classId) + " ID:" + std::to_string(trackedObject.trackId) + " " + cv::format("%.2f", trackedObject.confidence);
 
             if (isLeadTarget) {
                 label = "LEAD " + label + " " + RiskAnalyzer::toString(risk.level);
-
-                if (risk.valid && std::isfinite(risk.ttcSeconds)) {
-                    label += cv::format(" TTC-P:%.1fs", risk.ttcSeconds);
-                } else {
-                    label += " TTC-P:--";
-                }
+                if (risk.valid && std::isfinite(risk.ttcSeconds)) label += cv::format(" TTC-P:%.1fs", risk.ttcSeconds);
+                else label += " TTC-P:--";
             } else if (geometry.insideEgoLane) {
                 label += " EGO-LANE";
             } else if (geometry.insideRoad) {
@@ -1408,36 +995,12 @@ int main(int argc, char* argv[]) {
             }
 
             int baseline = 0;
-
-            const cv::Size labelSize =
-                cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &baseline);
-
-            const int labelX = std::clamp(
-                trackedObject.box.x,
-                0,
-                std::max(width - labelSize.width - 10, 0)
-            );
-
+            const cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &baseline);
+            const int labelX = std::clamp(trackedObject.box.x, 0, std::max(width - labelSize.width - 10, 0));
             const int labelTop = std::max(trackedObject.box.y, labelSize.height + 10);
 
-            cv::rectangle(
-                frame,
-                cv::Point(labelX, labelTop - labelSize.height - 10),
-                cv::Point(labelX + labelSize.width + 10, labelTop),
-                boxColor,
-                cv::FILLED
-            );
-
-            cv::putText(
-                frame,
-                label,
-                cv::Point(labelX + 5, labelTop - 5),
-                cv::FONT_HERSHEY_SIMPLEX,
-                0.55,
-                cv::Scalar(0, 0, 0),
-                2,
-                cv::LINE_AA
-            );
+            cv::rectangle(frame, cv::Point(labelX, labelTop - labelSize.height - 10), cv::Point(labelX + labelSize.width + 10, labelTop), boxColor, cv::FILLED);
+            cv::putText(frame, label, cv::Point(labelX + 5, labelTop - 5), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
         }
 
         /*
@@ -1449,82 +1012,32 @@ int main(int argc, char* argv[]) {
          * 현재 LEAD의 bbox/라벨만 다시 그림
          */
         if (riskAnalysisEnabled && activeLeadId >= 0 && leadRiskFound) {
-            const auto leadIterator = std::find_if(
-                trackedObjects.begin(),
-                trackedObjects.end(),
-                [&](const TrackedObject& candidate) {
-                    return candidate.trackId == activeLeadId;
-                }
-            );
+            const auto leadIterator = std::find_if(trackedObjects.begin(), trackedObjects.end(), [&](const TrackedObject& candidate) { return candidate.trackId == activeLeadId; });
+            const auto leadGeometryIterator = leadIterator != trackedObjects.end() ? geometryById.find(activeLeadId) : geometryById.end();
 
-            const auto leadGeometryIterator =
-                leadIterator != trackedObjects.end()
-                    ? geometryById.find(activeLeadId)
-                    : geometryById.end();
-
-            if (leadIterator != trackedObjects.end() &&
-                leadGeometryIterator != geometryById.end() &&
-                leadGeometryIterator->second.insideEgoLane) {
+            if (leadIterator != trackedObjects.end() && leadGeometryIterator != geometryById.end() && leadGeometryIterator->second.insideEgoLane) {
                 const TrackedObject& trackedObject = *leadIterator;
                 const ObjectGeometry& geometry = leadGeometryIterator->second;
-
                 cv::Scalar leadBoxColor;
 
-                if (leadRisk.level == RiskLevel::Danger) {
-                    leadBoxColor = cv::Scalar(0, 0, 255);
-                } else if (leadRisk.level == RiskLevel::Caution) {
-                    leadBoxColor = cv::Scalar(0, 255, 255);
-                } else {
-                    leadBoxColor = cv::Scalar(0, 255, 0);
-                }
+                if (leadRisk.level == RiskLevel::Danger) leadBoxColor = cv::Scalar(0, 0, 255);
+                else if (leadRisk.level == RiskLevel::Caution) leadBoxColor = cv::Scalar(0, 255, 255);
+                else leadBoxColor = cv::Scalar(0, 255, 0);
 
                 cv::rectangle(frame, trackedObject.box, leadBoxColor, 3);
                 cv::circle(frame, geometry.groundPoint, 6, leadBoxColor, -1);
 
-                std::string leadLabel =
-                    "LEAD " +
-                    getClassName(trackedObject.classId) +
-                    " ID:" + std::to_string(trackedObject.trackId) +
-                    " " + cv::format("%.2f", trackedObject.confidence) +
-                    " " + RiskAnalyzer::toString(leadRisk.level);
-
-                if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) {
-                    leadLabel += cv::format(" TTC-P:%.1fs", leadRisk.ttcSeconds);
-                } else {
-                    leadLabel += " TTC-P:--";
-                }
+                std::string leadLabel = "LEAD " + getClassName(trackedObject.classId) + " ID:" + std::to_string(trackedObject.trackId) + " " + cv::format("%.2f", trackedObject.confidence) + " " + RiskAnalyzer::toString(leadRisk.level);
+                if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) leadLabel += cv::format(" TTC-P:%.1fs", leadRisk.ttcSeconds);
+                else leadLabel += " TTC-P:--";
 
                 int baseline = 0;
-
-                const cv::Size labelSize =
-                    cv::getTextSize(leadLabel, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &baseline);
-
-                const int labelX = std::clamp(
-                    trackedObject.box.x,
-                    0,
-                    std::max(width - labelSize.width - 10, 0)
-                );
-
+                const cv::Size labelSize = cv::getTextSize(leadLabel, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &baseline);
+                const int labelX = std::clamp(trackedObject.box.x, 0, std::max(width - labelSize.width - 10, 0));
                 const int labelTop = std::max(trackedObject.box.y, labelSize.height + 10);
 
-                cv::rectangle(
-                    frame,
-                    cv::Point(labelX, labelTop - labelSize.height - 10),
-                    cv::Point(labelX + labelSize.width + 10, labelTop),
-                    leadBoxColor,
-                    cv::FILLED
-                );
-
-                cv::putText(
-                    frame,
-                    leadLabel,
-                    cv::Point(labelX + 5, labelTop - 5),
-                    cv::FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    cv::Scalar(0, 0, 0),
-                    2,
-                    cv::LINE_AA
-                );
+                cv::rectangle(frame, cv::Point(labelX, labelTop - labelSize.height - 10), cv::Point(labelX + labelSize.width + 10, labelTop), leadBoxColor, cv::FILLED);
+                cv::putText(frame, leadLabel, cv::Point(labelX + 5, labelTop - 5), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
             }
         }
 
@@ -1540,147 +1053,65 @@ int main(int argc, char* argv[]) {
          * 새 화면에 차량이 없는데 이전 장면의 경고가 남는 현상이 사라짐
          */
         if (!riskAnalysisEnabled || sceneChanged) {
-            cautionHoldRemaining = 0;
-            dangerHoldRemaining = 0;
-
-            cautionCandidateFrames = 0;
-            dangerCandidateFrames = 0;
+            cautionHoldRemaining = 0; dangerHoldRemaining = 0;
+            cautionCandidateFrames = 0; dangerCandidateFrames = 0;
             warningCandidateLeadId = -1;
         } else if (leadRiskFound && activeLeadId >= 0) {
             // 선행 차량 ID가 바뀌면 이전 차량에서 쌓인
             // 위험 연속 프레임 수를 이어받지 않음
             if (warningCandidateLeadId != activeLeadId) {
                 warningCandidateLeadId = activeLeadId;
-
-                cautionCandidateFrames = 0;
-                dangerCandidateFrames = 0;
+                cautionCandidateFrames = 0; dangerCandidateFrames = 0;
             }
 
             if (leadRisk.level == RiskLevel::Danger) {
-                ++dangerCandidateFrames;
-                cautionCandidateFrames = 0;
-
-                if (dangerCandidateFrames >= dangerConfirmationFrames) {
-                    dangerHoldRemaining = warningHoldFrames;
-                    cautionHoldRemaining = 0;
-                }
+                ++dangerCandidateFrames; cautionCandidateFrames = 0;
+                if (dangerCandidateFrames >= dangerConfirmationFrames) { dangerHoldRemaining = warningHoldFrames; cautionHoldRemaining = 0; }
             } else if (leadRisk.level == RiskLevel::Caution) {
-                ++cautionCandidateFrames;
-                dangerCandidateFrames = 0;
-
-                if (cautionCandidateFrames >= cautionConfirmationFrames) {
-                    cautionHoldRemaining = warningHoldFrames;
-                }
-
-                if (dangerHoldRemaining > 0) {
-                    --dangerHoldRemaining;
-                }
+                ++cautionCandidateFrames; dangerCandidateFrames = 0;
+                if (cautionCandidateFrames >= cautionConfirmationFrames) cautionHoldRemaining = warningHoldFrames;
+                if (dangerHoldRemaining > 0) --dangerHoldRemaining;
             } else {
-                cautionCandidateFrames = 0;
-                dangerCandidateFrames = 0;
-
-                if (dangerHoldRemaining > 0) {
-                    --dangerHoldRemaining;
-                }
-
-                if (cautionHoldRemaining > 0) {
-                    --cautionHoldRemaining;
-                }
+                cautionCandidateFrames = 0; dangerCandidateFrames = 0;
+                if (dangerHoldRemaining > 0) --dangerHoldRemaining;
+                if (cautionHoldRemaining > 0) --cautionHoldRemaining;
             }
         } else {
-            warningCandidateLeadId = -1;
-            cautionCandidateFrames = 0;
-            dangerCandidateFrames = 0;
-
-            if (dangerHoldRemaining > 0) {
-                --dangerHoldRemaining;
-            }
-
-            if (cautionHoldRemaining > 0) {
-                --cautionHoldRemaining;
-            }
+            warningCandidateLeadId = -1; cautionCandidateFrames = 0; dangerCandidateFrames = 0;
+            if (dangerHoldRemaining > 0) --dangerHoldRemaining;
+            if (cautionHoldRemaining > 0) --cautionHoldRemaining;
         }
 
         // 장면 전환 직후의 위험 분석 대기 시간을 한 프레임 줄임
-        if (sceneWarmupRemaining > 0) {
-            --sceneWarmupRemaining;
-        }
+        if (sceneWarmupRemaining > 0) --sceneWarmupRemaining;
 
-        koreanText.putText(
-            frame,
-            "프레임: " + std::to_string(processedFrames),
-            cv::Point(30, 40),
-            25,
-            cv::Scalar(255, 255, 255)
-        );
-
-        koreanText.putText(
-            frame,
-            "추론 시간: " + std::string(cv::format("%.1f ms", inferenceMilliseconds)),
-            cv::Point(30, 72),
-            25,
-            cv::Scalar(255, 255, 255)
-        );
-
-        koreanText.putText(
-            frame,
-            "도로 객체: " + std::to_string(objectsOnRoad) +
-                "  내 차선: " + std::to_string(objectsInEgoLane),
-            cv::Point(30, 104),
-            25,
-            cv::Scalar(255, 255, 255)
-        );
+        koreanText.putText(frame, "프레임: " + std::to_string(processedFrames), cv::Point(30, 40), 25, cv::Scalar(255, 255, 255));
+        koreanText.putText(frame, "추론 시간: " + std::string(cv::format("%.1f ms", inferenceMilliseconds)), cv::Point(30, 72), 25, cv::Scalar(255, 255, 255));
+        koreanText.putText(frame, "도로 객체: " + std::to_string(objectsOnRoad) + "  내 차선: " + std::to_string(objectsInEgoLane), cv::Point(30, 104), 25, cv::Scalar(255, 255, 255));
 
         std::string leadStatus = "선행 차량: 없음";
-
         if (activeLeadId >= 0 && leadRiskFound) {
-            leadStatus =
-                "선행 차량 ID:" + std::to_string(activeLeadId) +
-                "  상태: " + getRiskNameKorean(leadRisk.level);
-
-            if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) {
-                leadStatus +=
-                    "  TTC-P:" + std::string(cv::format("%.1f초", leadRisk.ttcSeconds));
-            } else {
-                leadStatus += "  TTC-P:--";
-            }
+            leadStatus = "선행 차량 ID:" + std::to_string(activeLeadId) + "  상태: " + getRiskNameKorean(leadRisk.level);
+            if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) leadStatus += "  TTC-P:" + std::string(cv::format("%.1f초", leadRisk.ttcSeconds));
+            else leadStatus += "  TTC-P:--";
         }
 
-        koreanText.putText(
-            frame, leadStatus, cv::Point(30, 136), 25, cv::Scalar(255, 255, 255)
-        );
+        koreanText.putText(frame, leadStatus, cv::Point(30, 136), 25, cv::Scalar(255, 255, 255));
 
-        if (dangerHoldRemaining > 0) {
-            drawCenteredKoreanText(
-                koreanText, frame,
-                "위험: 충돌 가능성 높음",
-                58, 34, cv::Scalar(0, 0, 255)
-            );
-        } else if (cautionHoldRemaining > 0) {
-            drawCenteredKoreanText(
-                koreanText, frame,
-                "주의: 선행 차량 접근 중",
-                58, 31, cv::Scalar(0, 255, 255)
-            );
-        }
+        if (dangerHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "위험: 충돌 가능성 높음", 58, 34, cv::Scalar(0, 0, 255));
+        else if (cautionHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "주의: 선행 차량 접근 중", 58, 31, cv::Scalar(0, 255, 255));
 
         writer.write(frame);
     }
 
     const auto totalEnd = std::chrono::steady_clock::now();
-
-    const double elapsedSeconds =
-        std::chrono::duration<double>(totalEnd - totalStart).count();
-
-    const double processingFps =
-        elapsedSeconds > 0.0
-            ? static_cast<double>(processedFrames) / elapsedSeconds
-            : 0.0;
-
-    const double averageInferenceMilliseconds =
-        processedFrames > 0
-            ? totalInferenceMilliseconds / static_cast<double>(processedFrames)
-            : 0.0;
+    const double elapsedSeconds = std::chrono::duration<double>(totalEnd - totalStart).count();
+    const double processingFps = elapsedSeconds > 0.0 ? static_cast<double>(processedFrames) / elapsedSeconds : 0.0;
+    const double averageInferenceMilliseconds = processedFrames > 0 ? totalInferenceMilliseconds / static_cast<double>(processedFrames) : 0.0;
+    const double averageFullYoloMilliseconds = processedFrames > 0 ? totalFullYoloMilliseconds / static_cast<double>(processedFrames) : 0.0;
+    const double averageFarYoloMilliseconds = processedFrames > 0 ? totalFarYoloMilliseconds / static_cast<double>(processedFrames) : 0.0;
+    const double averagePostprocessMilliseconds = processedFrames > 0 ? totalPostprocessMilliseconds / static_cast<double>(processedFrames) : 0.0;
+    const double inferenceFps = averageInferenceMilliseconds > 0.0 ? 1000.0 / averageInferenceMilliseconds : 0.0;
 
     capture.release();
     writer.release();
@@ -1688,10 +1119,12 @@ int main(int argc, char* argv[]) {
     std::cout << '\n';
     std::cout << "[SUCCESS] Step 7 장면 전환/검출 오류 보완 영상 생성 완료\n";
     std::cout << "처리 프레임 수: " << processedFrames << '\n';
-    std::cout << "평균 추론 시간: " << std::fixed << std::setprecision(2)
-              << averageInferenceMilliseconds << " ms\n";
-    std::cout << "전체 처리 속도: " << std::fixed << std::setprecision(2)
-              << processingFps << " FPS\n";
+    std::cout << "전체 YOLO 평균: " << std::fixed << std::setprecision(2) << averageFullYoloMilliseconds << " ms\n";
+    std::cout << "원거리 YOLO 평균: " << std::fixed << std::setprecision(2) << averageFarYoloMilliseconds << " ms\n";
+    std::cout << "후처리 평균: " << std::fixed << std::setprecision(3) << averagePostprocessMilliseconds << " ms\n";
+    std::cout << "평균 추론 시간: " << std::fixed << std::setprecision(2) << averageInferenceMilliseconds << " ms\n";
+    std::cout << "추론 기준 FPS: " << std::fixed << std::setprecision(2) << inferenceFps << " FPS\n";
+    std::cout << "전체 처리 속도: " << std::fixed << std::setprecision(2) << processingFps << " FPS\n";
     std::cout << "결과 파일: " << outputPath << '\n';
 
     return 0;
