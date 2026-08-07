@@ -20,6 +20,10 @@ public:
         const std::vector<Detection>& detections
     );
 
+    // 장면 전환 시 기존 Track/Kalman 상태만 제거
+    // nextTrackId_는 유지해서 ID를 재사용하지 않음
+    void reset();
+
 private:
     struct TrackState {
         

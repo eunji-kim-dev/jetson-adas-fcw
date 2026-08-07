@@ -57,6 +57,11 @@ struct ObjectGeometry {
     cv::Point groundPoint;
     bool insideRoad = false;
     bool insideEgoLane = false;
+
+    // ego lane 경계를 순간적으로 벗어나도 위험 분석 이력은 잠시 유지
+    // 새 LEAD 후보 선정에는 쓰지 않고 기존 LEAD/분석 이력 보존에만 사용
+    bool laneHeld = false;
+
     float normalizedLaneX = 0.5F;
     float leadScore = -std::numeric_limits<float>::infinity();
     bool passingBy = false;
@@ -390,7 +395,9 @@ LanePosition calculateLanePosition(
     const float bottomY =
         (static_cast<float>(trapezoid[2].y) + static_cast<float>(trapezoid[3].y)) / 2.0F;
 
-    if (point.y < topY || point.y > bottomY || bottomY <= topY) {
+    // 화면 하단까지 내려온 가까운 차량은 bottomY 아래라고 차선 밖으로 버리지 않음
+    // verticalRatio가 아래에서 1.0으로 clamp되므로 하단 경계 기준으로 판정 가능
+    if (point.y < topY || bottomY <= topY) {
         return {};
     }
 
@@ -953,22 +960,32 @@ int main(int argc, char* argv[]) {
     constexpr float nmsThreshold = 0.45F;
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
-    RiskAnalyzer riskAnalyzer(sourceFps, 15, 60);
+    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60);
 
     int activeLeadId = -1;
 
     // 동영상 35초 길가 트럭이 잠깐 ego lane에 들어와 바로 LEAD가 되는 문제 방지
     std::unordered_map<int, int> egoLaneStreakById;
 
+    // ego lane 경계를 한두 프레임 벗어나도 기존 분석 이력을 바로 지우지 않기 위한 유예
+    std::unordered_map<int, int> egoLaneGraceById;
+
+    const int egoLaneGraceFrames =
+        std::max(3, static_cast<int>(std::round(sourceFps * 0.15)));
+
     const int leadEligibilityFrames =
         std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
 
-    // 추월하면서 옆으로 빠지는 차량과
-    // 실제 정면 선행 차량을 구분하기 위한 횡방향 이력
+    // 추월하면서 옆으로 빠지는 차량과 실제 정면 선행 차량을 구분하기 위한 횡방향 이력
     std::unordered_map<int, std::deque<float>> lateralHistoryById;
 
     constexpr std::size_t lateralHistorySize = 8;
     constexpr float maximumLateralDriftPerFrame = 0.02F;
+
+    // 컷인 차량은 정의상 ego lane에 방금 들어온 차량이므로
+    // 일반 LEAD의 0.5초 체류 조건보다 짧은 조건을 사용
+    const int cutInEligibilityFrames =
+        std::max(4, static_cast<int>(std::round(sourceFps * 0.15)));
 
     /*
      * 경고가 한두 프레임 만에 사라져 깜빡이는 현상을 줄이기 위한
@@ -980,23 +997,10 @@ int main(int argc, char* argv[]) {
     const int warningHoldFrames =
         std::max(1, static_cast<int>(std::round(sourceFps * 0.25)));
 
-    /*
-     * TTC-P는 바운딩 박스 높이 변화로 계산되므로,
-     * 멀리 있는 아주 작은 차량은 박스가 2~3픽셀만 흔들려도
-     * 급격히 접근하는 것처럼 계산될 수 있음
-     *
-     * 따라서 상단 경고와 CAUTION/DANGER 표시는
-     * 아래 신뢰성 조건을 모두 만족할 때만 허용
-     */
-    const int minimumLeadBoxHeightForWarning =
-        std::max(36, static_cast<int>(std::round(height * 0.05)));
-
+    // 시간 기반 위험 조건(샘플 수, 크기, 증가율, 접근 속도)은 RiskAnalyzer가 담당
+    // main.cpp에는 화면 기하 조건만 남김
     const int minimumLeadGroundYForWarning =
         static_cast<int>(std::round(height * 0.60));
-
-    constexpr int minimumRiskSamplesForWarning = 10;
-    constexpr float minimumHeightGrowthRatioForWarning = 1.08F;
-    constexpr float minimumGroundSpeedForWarning = 2.0F;
 
     int cautionHoldRemaining = 0;
     int dangerHoldRemaining = 0;
@@ -1034,9 +1038,6 @@ int main(int argc, char* argv[]) {
     cv::Mat frame;
     int processedFrames = 0;
     double totalInferenceMilliseconds = 0.0;
-    double totalFullYoloMilliseconds = 0.0;
-    double totalFarYoloMilliseconds = 0.0;
-    double totalPostprocessMilliseconds = 0.0;
 
     const auto totalStart = std::chrono::steady_clock::now();
 
@@ -1071,7 +1072,13 @@ int main(int argc, char* argv[]) {
 
             // 새 장면에서는 이전 장면의 lane 체류/횡이동 이력을 사용하지 않음
             egoLaneStreakById.clear();
+            egoLaneGraceById.clear();
             lateralHistoryById.clear();
+
+            // 이전 장면의 Kalman Track과 TTC-P 이력을 새 장면으로 넘기지 않음
+            // nextTrackId_는 tracker.reset() 안에서 유지되어 ID는 실행 전체에서 유일함
+            tracker.reset();
+            riskAnalyzer.reset();
 
             std::cout << "[SCENE CHANGE] frame=" << processedFrames
                       << " diff=" << std::fixed << std::setprecision(2) << sceneDifference
@@ -1091,97 +1098,62 @@ int main(int argc, char* argv[]) {
 
         const bool riskAnalysisEnabled = sceneWarmupRemaining <= 0;
 
-  const auto inferenceStart = std::chrono::steady_clock::now();
+        const auto inferenceStart = std::chrono::steady_clock::now();
 
-std::vector<Detection> detections;
+        std::vector<Detection> detections;
 
-double fullYoloMilliseconds = 0.0;
-double farYoloMilliseconds = 0.0;
-double postprocessMilliseconds = 0.0;
+        try {
+            // 기본 YOLO 검출
+            // 전체 블랙박스 프레임에서 먼저 객체를 검출
+            detections = detectObjects(net, frame, detectorThreshold, nmsThreshold);
 
-    try {
-        // 1. 전체 프레임 YOLO
-        const auto fullYoloStart = std::chrono::steady_clock::now();
+            // 동영상 13초 차량 미검출 오류 수정
+            // 전체 프레임에서는 너무 작아진 원거리 차량을
+            // 중앙 도로 crop 영역에서 한 번 더 확대 추론
+            const std::vector<Detection> farDetections =
+                detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
 
-        detections = detectObjects(net, frame, detectorThreshold, nmsThreshold);
+            // 전체 프레임 검출 + 원거리 crop 검출을 합침
+            detections.insert(
+                detections.end(), farDetections.begin(), farDetections.end()
+            );
 
-        const auto fullYoloEnd = std::chrono::steady_clock::now();
+            // 두 추론에서 같은 차량이 각각 검출될 수 있으므로
+            // 합쳐진 결과에 클래스 그룹별 NMS를 다시 적용
+            detections = applyGroupedNms(detections, nmsThreshold);
 
-        fullYoloMilliseconds = std::chrono::duration<double, std::milli>(
-            fullYoloEnd - fullYoloStart
-        ).count();
+            // 동영상 17초 ID:29 큰 박스 오류 수정
+            // IoU NMS로 제거되지 않는 부분 포함형/납작한 큰 박스를
+            // containment + 중심 포함 + 종횡비 조건으로 한 번 더 제거
+            detections = suppressContainedDuplicates(detections);
 
-        // 2. 원거리 crop YOLO
-        const auto farYoloStart = std::chrono::steady_clock::now();
+            // 동영상 38초 ID:60 오검출 수정
+            // 높이 4~5px 수준의 극소 박스가 Track으로 확정되는 것을 방지
+            const int minimumDetectionHeight =
+                std::max(8, static_cast<int>(std::round(height * 0.014)));
 
-        const std::vector<Detection> farDetections =
-            detectFarRoadObjects(net, frame, detectorThreshold, nmsThreshold);
+            detections.erase(
+                std::remove_if(
+                    detections.begin(), detections.end(),
+                    [&](const Detection& detection) {
+                        return detection.box.height < minimumDetectionHeight;
+                    }
+                ),
+                detections.end()
+            );
+        } catch (const std::exception& error) {
+            std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
+            return 1;
+        }
 
-        const auto farYoloEnd = std::chrono::steady_clock::now();
+        const auto inferenceEnd = std::chrono::steady_clock::now();
 
-        farYoloMilliseconds = std::chrono::duration<double, std::milli>(
-            farYoloEnd - farYoloStart
-        ).count();
+        const double inferenceMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                inferenceEnd - inferenceStart
+            ).count();
 
-        // 3. 후처리
-        const auto postprocessStart = std::chrono::steady_clock::now();
-
-        // 전체 프레임 + 원거리 crop 검출 결과 병합
-        detections.insert(detections.end(), farDetections.begin(), farDetections.end());
-
-        // 그룹별 NMS
-        detections = applyGroupedNms(detections, nmsThreshold);
-
-        // 포함형 / 비정상 중복 박스 제거
-        detections = suppressContainedDuplicates(detections);
-
-        // 극소 박스 제거
-        const int minimumDetectionHeight =
-            std::max(8, static_cast<int>(std::round(height * 0.014)));
-
-        detections.erase(
-            std::remove_if(
-                detections.begin(), detections.end(),
-                [&](const Detection& detection) {
-                    return detection.box.height < minimumDetectionHeight;
-                }
-            ),
-            detections.end()
-        );
-
-        const auto postprocessEnd = std::chrono::steady_clock::now();
-
-        postprocessMilliseconds = std::chrono::duration<double, std::milli>(
-            postprocessEnd - postprocessStart
-        ).count();
-    } catch (const std::exception& error) {
-        std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
-        return 1;
-    }
-
-    const auto inferenceEnd = std::chrono::steady_clock::now();
-
-    const double inferenceMilliseconds = std::chrono::duration<double, std::milli>(
-        inferenceEnd - inferenceStart
-    ).count();
-
-    // 누적
-    totalInferenceMilliseconds += inferenceMilliseconds;
-    totalFullYoloMilliseconds += fullYoloMilliseconds;
-    totalFarYoloMilliseconds += farYoloMilliseconds;
-    totalPostprocessMilliseconds += postprocessMilliseconds;
-
-    // 콘솔 출력
-    const double averageMilliseconds =
-        totalInferenceMilliseconds / static_cast<double>(processedFrames);
-
-    std::cout << std::fixed << std::setprecision(2)
-            << "[PERF] frame=" << processedFrames
-            << " | Full YOLO=" << fullYoloMilliseconds << " ms"
-            << " | Far YOLO=" << farYoloMilliseconds << " ms"
-            << " | Post=" << postprocessMilliseconds << " ms"
-            << " | Total=" << inferenceMilliseconds << " ms"
-            << " | AVG=" << averageMilliseconds << " ms" << '\n';
+        totalInferenceMilliseconds += inferenceMilliseconds;
 
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
 
@@ -1204,18 +1176,24 @@ double postprocessMilliseconds = 0.0;
             const LanePosition lanePosition =
                 calculateLanePosition(egoLaneRoi, groundPoint);
 
-            // 동영상 35초 길가 트럭 LEAD 오선택 수정
-            // ego lane에 0.5초 이상 연속으로 머문 차량만 LEAD 후보가 될 수 있음
+            // 새 LEAD 진입 조건은 엄격하게 유지하되,
+            // 이미 lane 안에 있던 차량이 경계를 잠깐 넘는 경우 이력은 유예 기간 동안 보존
             int& laneStreak = egoLaneStreakById[trackedObject.trackId];
+            int& laneGrace = egoLaneGraceById[trackedObject.trackId];
 
             if (lanePosition.inside) {
                 ++laneStreak;
+                laneGrace = egoLaneGraceFrames;
+            } else if (laneGrace > 0) {
+                --laneGrace;
             } else {
                 laneStreak = 0;
             }
 
-            // 동영상 35초 추월 차량 DANGER 오경고 수정
-            // lane 중앙에서 바깥쪽으로 빠르게 밀려나는 차량은 passing-by로 판단
+            const bool laneHeld = lanePosition.inside || laneGrace > 0;
+
+            // lane 중앙에서 바깥쪽으로 이동하면 passing-by,
+            // 반대로 중앙으로 빠르게 접근하면 cutting-in으로 판단
             auto& lateralHistory = lateralHistoryById[trackedObject.trackId];
 
             if (lanePosition.inside) {
@@ -1224,7 +1202,7 @@ double postprocessMilliseconds = 0.0;
                 if (lateralHistory.size() > lateralHistorySize) {
                     lateralHistory.pop_front();
                 }
-            } else {
+            } else if (!laneHeld) {
                 lateralHistory.clear();
             }
 
@@ -1238,13 +1216,20 @@ double postprocessMilliseconds = 0.0;
                                        static_cast<float>(lateralHistory.size() - 1);
             }
 
-            const bool passingBy = outwardDriftPerFrame > maximumLateralDriftPerFrame;
+            const bool passingBy =
+                outwardDriftPerFrame > maximumLateralDriftPerFrame;
+
+            const bool cuttingIn =
+                outwardDriftPerFrame < -maximumLateralDriftPerFrame;
+
+            const int requiredStreak =
+                cuttingIn ? cutInEligibilityFrames : leadEligibilityFrames;
 
             float leadScore = -std::numeric_limits<float>::infinity();
 
             if (lanePosition.inside &&
                 isVehicleClass(trackedObject.classId) &&
-                laneStreak >= leadEligibilityFrames) {
+                laneStreak >= requiredStreak) {
                 const float centerPenalty =
                     std::abs(lanePosition.normalizedX - 0.5F) * 90.0F;
 
@@ -1262,6 +1247,7 @@ double postprocessMilliseconds = 0.0;
                 groundPoint,
                 insideRoad,
                 lanePosition.inside,
+                laneHeld,
                 lanePosition.normalizedX,
                 leadScore,
                 passingBy
@@ -1273,6 +1259,15 @@ double postprocessMilliseconds = 0.0;
              iterator != egoLaneStreakById.end();) {
             if (geometryById.find(iterator->first) == geometryById.end()) {
                 iterator = egoLaneStreakById.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+
+        for (auto iterator = egoLaneGraceById.begin();
+             iterator != egoLaneGraceById.end();) {
+            if (geometryById.find(iterator->first) == geometryById.end()) {
+                iterator = egoLaneGraceById.erase(iterator);
             } else {
                 ++iterator;
             }
@@ -1333,48 +1328,37 @@ double postprocessMilliseconds = 0.0;
                 ++objectsInEgoLane;
             }
 
+            // ego lane 차량은 LEAD가 되기 전부터 TTC-P 샘플을 축적한다.
+            // 실제 CAUTION/DANGER 단계 판정은 activeLeadId 한 대에만 수행한다.
+            const bool isAnalysisTarget =
+                riskAnalysisEnabled &&
+                geometry.laneHeld &&
+                isVehicleClass(trackedObject.classId);
+
             const bool isLeadTarget =
                 riskAnalysisEnabled &&
                 trackedObject.trackId == activeLeadId &&
-                geometry.insideEgoLane;
+                geometry.laneHeld;
 
             const RiskResult rawRisk =
-                riskAnalyzer.update(trackedObject, isLeadTarget, processedFrames);
+                riskAnalyzer.update(
+                    trackedObject,
+                    isAnalysisTarget,
+                    isLeadTarget,
+                    processedFrames
+                );
 
-            /*
-             * 원시 TTC-P 결과를 그대로 경고에 사용하지 않고
-             * 화면상 거리와 접근 움직임을 함께 확인
-             *
-             * 14.98~15.58초의 오경고는 멀리 있는 작은 선행 차량의
-             * 박스 높이가 몇 픽셀 흔들리면서 TTC-P가 약 4초로
-             * 잘못 계산되어 발생
-             *
-             * 다음을 모두 만족해야 CAUTION/DANGER를 인정
-             * 1. TTC-P 계산이 유효함
-             * 2. 관찰 샘플이 충분함
-             * 3. 선행 차량 박스가 너무 작지 않음
-             * 4. 차량 접지점이 화면에서 충분히 가까운 위치에 있음
-             * 5. 박스 높이가 전체 관찰 구간에서 의미 있게 증가함
-             * 6. 접지점도 아래 방향으로 이동하고 있음
-             * 7. lane 중앙에서 바깥쪽으로 빠르게 이탈하는 추월 차량이 아닐 것
-             */
-            const bool hasReliableWarningEvidence =
+            // 시간 기반 조건은 RiskAnalyzer에서 이미 판단했으므로
+            // main.cpp에서는 화면 위치와 passing-by 여부만 검사한다.
+            const bool geometryAllowsWarning =
                 isLeadTarget &&
-                rawRisk.valid &&
-                std::isfinite(rawRisk.ttcSeconds) &&
-                rawRisk.sampleCount >= minimumRiskSamplesForWarning &&
-                trackedObject.box.height >= minimumLeadBoxHeightForWarning &&
-                geometry.groundPoint.y >= minimumLeadGroundYForWarning &&
-                rawRisk.heightGrowthRatio >= minimumHeightGrowthRatioForWarning &&
-                rawRisk.groundSpeedPixelsPerSecond >= minimumGroundSpeedForWarning &&
+                (rawRisk.truncated ||
+                 geometry.groundPoint.y >= minimumLeadGroundYForWarning) &&
                 !geometry.passingBy;
 
-            // 내부 RiskAnalyzer의 계산 결과는 유지하되,
-            // 신뢰성 조건을 통과하지 못한 CAUTION/DANGER는
-            // 화면 표시와 상단 경고에서는 SAFE로 처리
             RiskResult risk = rawRisk;
 
-            if (risk.level != RiskLevel::Safe && !hasReliableWarningEvidence) {
+            if (risk.level != RiskLevel::Safe && !geometryAllowsWarning) {
                 risk.level = RiskLevel::Safe;
                 risk.valid = false;
                 risk.ttcSeconds = std::numeric_limits<float>::infinity();

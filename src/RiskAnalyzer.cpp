@@ -6,8 +6,17 @@
 #include <stdexcept>
 #include <vector>
 
-RiskAnalyzer::RiskAnalyzer(double fps, int historySize, int staleFrameLimit)
+RiskAnalyzer::RiskAnalyzer(
+    double fps,
+    int frameHeight,
+    int historySize,
+    int staleFrameLimit
+)
     : fps_(fps),
+
+      // 박스 하단이 화면 밖으로 나갔는지 판단하고
+      // 경고 최소 박스 높이를 해상도 비율로 계산할 때 씀
+      frameHeight_(std::max(frameHeight, 1)),
 
       // TTC 추세 계산하려면 샘플이 최소한 좀 있어야 해서 8 밑으로는 못 내려가게 막음
       historySize_(static_cast<std::size_t>(std::max(historySize, 8))),
@@ -103,12 +112,28 @@ float RiskAnalyzer::calculateAverageHeight(
     return total / static_cast<float>(count);
 }
 
-// 트랙 기록 리셋. lead 대상에서 빠졌거나, 공백이 너무 길었거나,
+// 트랙 기록 리셋. 분석 대상에서 빠졌거나, 공백이 너무 길었거나,
 // 과거 기록이랑 지금 기록을 이어 붙이면 안 되는 상황에서 호출됨
 // lastSeenFrame은 정리(removeStaleTracks) 판단에 필요해서 여기선 안 건드림
 void RiskAnalyzer::resetTrackHistory(TrackHistory& history) {
     history.samples.clear();
 
+    history.stableLevel = RiskLevel::Safe;
+    history.pendingLevel = RiskLevel::Safe;
+
+    history.pendingFrames = 0;
+    history.lowerLevelFrames = 0;
+
+    // 절단 보정용 종횡비도 같이 버림
+    // 이전 트랙 상태에서 재던 값을 새 관측에 이어 쓰면 등가 높이가 어긋남
+    history.lastAspectRatio = 0.0F;
+}
+
+// 단계 판정만 SAFE로 되돌리고 샘플 이력은 그대로 둠
+// LEAD가 아닌 ego lane 차량은 샘플만 계속 쌓아두는데,
+// 예전에 LEAD였을 때 올라간 stableLevel이 남아 있으면
+// 지금 판정하지도 않은 단계가 결과로 나가버림
+void RiskAnalyzer::clearLevelState(TrackHistory& history) {
     history.stableLevel = RiskLevel::Safe;
     history.pendingLevel = RiskLevel::Safe;
 
@@ -177,6 +202,7 @@ RiskLevel RiskAnalyzer::stabilizeLevel(TrackHistory& history, RiskLevel rawLevel
 
 RiskResult RiskAnalyzer::update(
     const TrackedObject& trackedObject,
+    bool isAnalysisTarget,
     bool isLeadTarget,
     int currentFrame
 ) {
@@ -191,21 +217,50 @@ RiskResult RiskAnalyzer::update(
 
     history.lastSeenFrame = currentFrame;
 
-    // lead 차량이 아니면 분석 대상 아님
-    // 예전에 lead였던 기록이 남아있으면 나중에 다시 선택될 때 옛날 움직임이랑 섞일 수 있어서
-    // lead에서 빠지는 순간 바로 리셋함
-    if (!isLeadTarget) {
+    // 분석 대상(ego lane 안의 차량)이 아니면 기록 자체를 버림
+    // 차선 밖으로 나간 차량의 옛날 박스 변화를 나중에 이어 쓰면 TTC가 엉뚱하게 나옴
+    if (!isAnalysisTarget) {
         resetTrackHistory(history);
 
         return RiskResult{};
     }
 
-    // log(높이) 계산할 때 0 이하 들어가면 안 되니 최소 1픽셀로 clamp
-    const float boxHeight = static_cast<float>(std::max(trackedObject.box.height, 1));
+    const int rawBottom = trackedObject.box.y + trackedObject.box.height;
+    const int rawWidth = std::max(trackedObject.box.width, 1);
+    const int rawHeight = std::max(trackedObject.box.height, 1);
+
+    /*
+     * 검출 박스는 detectObjects()에서 프레임 경계로 clamp되니까,
+     * 선행 차량이 아주 가까워져서 박스 하단이 화면 밖으로 나가면
+     * height 증가랑 groundY 하강이 동시에 멈춰버림
+     *
+     * 하필 위험이 제일 큰 순간에 두 지표가 다 0으로 수렴해서
+     * TTC-P가 무한대가 되고 경고가 SAFE로 되돌아감
+     *
+     * 화면 폭 안에 남아 있는 width는 계속 커지니까,
+     * 절단 직전 종횡비로 등가 높이를 만들어서 시계열을 이어붙임
+     *
+     * log(w)랑 log(h)는 기울기가 같고 상수 오프셋만 다른데,
+     * 오프셋 제거 없이 그냥 갈아타면 시계열 중간에 계단이 생겨서
+     * 없던 기울기가 만들어짐 -> 반드시 종횡비로 환산해야 함
+     */
+    const bool truncated = rawBottom >= frameHeight_ - 2;
+
+    float boxHeight = static_cast<float>(rawHeight);
+
+    if (!truncated) {
+        history.lastAspectRatio =
+            static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
+    } else if (history.lastAspectRatio > 1.0e-3F) {
+        boxHeight = static_cast<float>(rawWidth) / history.lastAspectRatio;
+    }
 
     // 박스 하단 y좌표. 차량이 화면 아래로 내려올수록 커짐
-    const float groundY =
-        static_cast<float>(trackedObject.box.y + trackedObject.box.height);
+    // 절단된 상태면 실제 하단이 화면 밖이라 719 같은 값에 고정되니까,
+    // 등가 높이로 가상 접지점을 만들어서 회귀 입력이 끊기지 않게 함
+    const float groundY = truncated
+        ? static_cast<float>(trackedObject.box.y) + boxHeight
+        : static_cast<float>(rawBottom);
 
     // update()가 같은 프레임에 두 번 불리는 경우 대비 - 중복 추가 말고 덮어씀
     if (!history.samples.empty() &&
@@ -220,11 +275,20 @@ RiskResult RiskAnalyzer::update(
         history.samples.pop_front();
     }
 
+    // LEAD가 아니면 샘플만 쌓아두고 단계 판정은 안 함
+    // 이렇게 해두면 나중에 LEAD로 뽑히는 순간 이미 샘플이 차 있어서
+    // 8~10샘플 기다리는 시간만큼 경고가 늦어지지 않음
+    if (!isLeadTarget) {
+        clearLevelState(history);
+    }
+
     RiskResult result;
 
     result.sampleCount = static_cast<int>(history.samples.size());
+    result.truncated = truncated;
 
     // 새 단계가 아직 확정 안 됐어도 일단 지금 안정화된 단계를 기본값으로
+    // (LEAD가 아니면 바로 위에서 SAFE로 되돌려놨음)
     result.level = history.stableLevel;
 
     // 샘플이 8개 미만이면 박스 흔들림인지 진짜 확대 추세인지 구분 안 되니까
@@ -267,34 +331,6 @@ RiskResult RiskAnalyzer::update(
         ttcSeconds = 1.0F / logHeightRate;
     }
 
-    // 너무 작은(멀리 있는) 객체의 불안정한 변화율을 위험으로 오판하지 않기 위한
-    // 최소 크기 조건에 쓸 현재 프레임 박스 높이
-    const float currentHeight = history.samples.back().boxHeight;
-
-    // 아직 안정화 전, 이번 프레임만 놓고 본 위험 단계
-    RiskLevel rawLevel = RiskLevel::Safe;
-
-    // DANGER 조건: TTC 계산 가능 + 박스 18px 이상 + 최근 높이 6% 이상 증가
-    // + 접지점 초당 8px 이상 하강 + TTC 2.5초 이하
-    // 여러 조건을 같이 요구하는 이유는 박스 하나만 순간적으로 커지는 오검출 걸러내려고
-    if (std::isfinite(ttcSeconds) &&
-        currentHeight >= 18.0F &&
-        heightGrowthRatio >= 1.06F &&
-        groundSpeed >= 8.0F &&
-        ttcSeconds <= 2.5F) {
-        rawLevel = RiskLevel::Danger;
-    } else if (std::isfinite(ttcSeconds) &&
-               currentHeight >= 12.0F &&
-               heightGrowthRatio >= 1.025F &&
-               groundSpeed >= 2.5F &&
-               ttcSeconds <= 5.0F) {
-        // CAUTION은 DANGER보다 완화된 기준 (12px / 2.5% / 2.5px/s / 5초)
-        rawLevel = RiskLevel::Caution;
-    }
-
-    // 이번 프레임 rawLevel 그대로 안 쓰고 안정화된 값으로 반환
-    result.level = stabilizeLevel(history, rawLevel);
-
     // 샘플 충분하고 TTC가 유한할 때만 valid=true
     // (샘플은 충분한데 차가 안 가까워지면 TTC는 무한대라 화면엔 "--"로 표시됨)
     result.valid = std::isfinite(ttcSeconds);
@@ -303,6 +339,65 @@ RiskResult RiskAnalyzer::update(
     result.logHeightRatePerSecond = logHeightRate;
     result.groundSpeedPixelsPerSecond = groundSpeed;
     result.heightGrowthRatio = heightGrowthRatio;
+
+    // LEAD가 아니면 수치만 채워서 돌려주고 단계 판정은 여기서 끝
+    // stabilizeLevel을 돌려버리면 LEAD 아닌 동안 내부 단계가 몰래 올라가 있다가
+    // LEAD로 바뀌는 순간 승격 카운트 없이 경고가 튀어나옴
+    if (!isLeadTarget) {
+        return result;
+    }
+
+    // 너무 작은(멀리 있는) 객체의 불안정한 변화율을 위험으로 오판하지 않기 위한
+    // 최소 크기 조건에 쓸 현재 프레임 박스 높이
+    const float currentHeight = history.samples.back().boxHeight;
+
+    /*
+     * 경고 판정 공통 조건
+     *
+     * 원래 최소 박스 높이가 12/18px이었는데, 원거리 소형 박스가
+     * 2~3px 흔들리는 것만으로 TTC-P가 4초대로 계산되는 오경고가 있었음
+     * (동영상 14.98~15.58초 구간)
+     *
+     * 그때는 main.cpp 쪽에 36px 게이트를 하나 더 얹어서 막았는데,
+     * 그러면 안쪽 12/18px이 절대 안 걸리는 죽은 값이 됨
+     * 그래서 기준을 여기 한 곳으로 합침
+     */
+    const int minimumWarningHeight =
+        std::max(36, static_cast<int>(std::round(frameHeight_ * 0.05)));
+
+    constexpr std::size_t minimumSamplesForWarning = 10;
+
+    const bool baseConditionsMet =
+        std::isfinite(ttcSeconds) &&
+        history.samples.size() >= minimumSamplesForWarning &&
+        currentHeight >= static_cast<float>(minimumWarningHeight);
+
+    // 접지점이 아래로 내려가는 건 접근의 보조 증거인데,
+    // 박스가 절단된 상태면 접지점이 화면 하단에 고정돼서 무조건 0이 나옴
+    // 절단은 이미 아주 가까워졌다는 뜻이니까 이 조건은 통과시킴
+    const bool groundEvidenceForDanger = truncated || groundSpeed >= 8.0F;
+    const bool groundEvidenceForCaution = truncated || groundSpeed >= 2.5F;
+
+    // 아직 안정화 전, 이번 프레임만 놓고 본 위험 단계
+    RiskLevel rawLevel = RiskLevel::Safe;
+
+    // DANGER: 높이 6% 이상 증가 + 접지점 초당 8px 이상 하강 + TTC 2.5초 이하
+    // 여러 조건을 같이 요구하는 이유는 박스 하나만 순간적으로 커지는 오검출 걸러내려고
+    if (baseConditionsMet &&
+        heightGrowthRatio >= 1.06F &&
+        groundEvidenceForDanger &&
+        ttcSeconds <= 2.5F) {
+        rawLevel = RiskLevel::Danger;
+    } else if (baseConditionsMet &&
+               heightGrowthRatio >= 1.03F &&
+               groundEvidenceForCaution &&
+               ttcSeconds <= 5.0F) {
+        // CAUTION은 DANGER보다 완화된 기준 (3% / 2.5px/s / 5초)
+        rawLevel = RiskLevel::Caution;
+    }
+
+    // 이번 프레임 rawLevel 그대로 안 쓰고 안정화된 값으로 반환
+    result.level = stabilizeLevel(history, rawLevel);
 
     return result;
 }
@@ -327,6 +422,13 @@ void RiskAnalyzer::removeStaleTracks(int currentFrame) {
     for (const int trackId : staleIds) {
         histories_.erase(trackId);
     }
+}
+
+// 장면 전환처럼 이전 프레임과의 연속성이 완전히 끊긴 경우에 호출
+// 0.5초 분석 유예만으로는 이번 프레임에 보이는 객체 기록만 지워지고,
+// 컷 직전에 사라진 트랙 기록은 staleFrameLimit_까지 남아 있음
+void RiskAnalyzer::reset() {
+    histories_.clear();
 }
 
 std::string RiskAnalyzer::toString(RiskLevel level) {
