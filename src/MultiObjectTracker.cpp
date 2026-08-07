@@ -557,3 +557,7 @@ std::vector<TrackedObject> MultiObjectTracker::update(
 
     return trackedObjects;
 }
+
+void MultiObjectTracker::reset() {
+    tracks_.clear();
+}

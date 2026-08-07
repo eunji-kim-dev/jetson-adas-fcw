@@ -84,6 +84,11 @@ private:
 
     static void resetTrackHistory(TrackHistory& history);
 
+    // 샘플은 남기고 단계 판정 상태만 SAFE로 되돌림
+    static void clearLevelState(
+        TrackHistory& history
+    );
+
     RiskLevel stabilizeLevel(
         TrackHistory& history,
         RiskLevel rawLevel
