@@ -94,5 +94,27 @@
 - 나중에 내 차선 영역(ROI)을 조정할 때 선행 차량을 잡는 범위도 같이 확인할 필요가 있음
 
 
+### 4. perception/adas/apps 디렉토리 구조로 파일 이동
+- 기존 코드를 역할에 따라 세 영역으로 나눠서 파일을 이동함
+  - `perception/` → Detection, MultiObjectTracker
+  - `adas/` → RiskAnalyzer
+  - `apps/fcw_demo/` → main.cpp
+- 헤더 include 경로를 소속이 드러나도록 변경함
+  - `#include "perception/..."`
+  - `#include "adas/..."`
+- CMakeLists의 소스 경로와 include 경로를 새 구조에 맞게 수정함
+- 아직 CMake 타깃은 기존 `adas` 하나로 유지함
+- 프로그램 로직은 변경하지 않음
+- 같은 영상을 다시 실행한 결과 baseline MD5가 이전과 동일함
+  - `a0006c4a16dbe3f69c178fbc5c1b6b8e`
+- 따라서 파일 위치와 include 경로만 바뀌었고 실행 결과는 변하지 않았음을 확인함
+
+
 ### 다음 작업
-- 640 1회 / 640 + crop 2회 / 960 1회 비교
+- CMake 타깃을 `perception_core`, `adas_fcw`, `fcw_demo`로 분리함
+  - 의존 방향: `perception_core ← adas_fcw ← fcw_demo`
+- `perception_core`에서 `adas` 헤더를 include했을 때 빌드가 실패하는지 확인함
+  - 확인 후 테스트용 include는 바로 되돌림
+- `perception_demo`를 추가해서 `adas_fcw` 없이도 Detection/Tracking만 링크·실행되는지 확인함
+- 같은 기준 영상을 다시 실행해서 baseline MD5가 `a0006c4a16dbe3f69c178fbc5c1b6b8e`와 동일한지 확인함
+- 이상 없으면 타깃 분리 작업을 커밋함
