@@ -28,12 +28,15 @@
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -590,7 +593,9 @@ void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const 
 int main(int argc, char* argv[]) {
     const std::string inputPath = argc >= 2 ? argv[1] : "videos/input.mp4";
     const std::string modelPath = "models/yolov8n.onnx";
-    const std::string outputPath = "results/step7_scene_change_fixed_output.avi";
+    const std::string inputStem = std::filesystem::path(inputPath).stem().string();
+    const std::string outputPath = "results/" + inputStem + "_output.avi";
+    const std::string csvPath = "results/" + inputStem + "_frames.csv";
 
     std::filesystem::create_directories("results");
 
@@ -632,6 +637,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
         return 1;
     }
+
+    std::ofstream csvFile(csvPath);
+    if (!csvFile.is_open()) {
+        std::cerr << "[ERROR] CSV 생성 실패: " << csvPath << '\n';
+        return 1;
+    }
+
+    csvFile << "frame,sceneChanged,numDetections,detections,numTracks,tracks,activeLeadId,riskLevel,ttc\n";
 
     // 넓은 도로 관심 영역
     // 실제 위험 판단은 아래 egoLaneRoi의 선행 차량 한 대에만 적용
@@ -1060,6 +1073,73 @@ int main(int argc, char* argv[]) {
 
         if (dangerHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "위험: 충돌 가능성 높음", 58, 34, cv::Scalar(0, 0, 255));
         else if (cautionHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "주의: 선행 차량 접근 중", 58, 31, cv::Scalar(0, 255, 255));
+        
+        auto sortedDetections = detections;
+        auto sortedTracks = trackedObjects;
+
+        std::sort(sortedDetections.begin(), sortedDetections.end(),
+          [](const Detection& first, const Detection& second) {
+              return std::tie(first.classId, first.box.x, first.box.y, first.box.width, first.box.height)
+                   < std::tie(second.classId, second.box.x, second.box.y, second.box.width, second.box.height);
+          });
+
+        std::sort(sortedTracks.begin(), sortedTracks.end(),
+          [](const TrackedObject& first, const TrackedObject& second) {
+              return first.trackId < second.trackId;
+          });
+
+        std::ostringstream detectionStream;
+
+        detectionStream << std::fixed << std::setprecision(4);
+
+        for (std::size_t i = 0; i < sortedDetections.size(); ++i) {
+            const Detection& detection = sortedDetections[i];
+            if (i > 0) detectionStream << ';';
+
+            detectionStream << detection.classId << ':'
+                            << detection.box.x << ':'
+                            << detection.box.y << ':'
+                            << detection.box.width << ':'
+                            << detection.box.height << ':'
+                            << detection.confidence;
+        }
+
+        std::ostringstream trackStream;
+
+        for (std::size_t i = 0; i < sortedTracks.size(); ++i) {
+            const TrackedObject& track = sortedTracks[i];
+            if (i > 0) trackStream << ';';
+
+            trackStream << track.trackId << ':'
+                        << track.classId << ':'
+                        << track.box.x << ':'
+                        << track.box.y << ':'
+                        << track.box.width << ':'
+                        << track.box.height;
+        }
+
+        const std::string riskLevel = leadRiskFound ? RiskAnalyzer::toString(leadRisk.level) : "NONE";
+
+        std::string ttcText = "inf";
+
+        if (leadRiskFound && std::isfinite(leadRisk.ttcSeconds)) {
+            std::ostringstream ttcStream;
+            ttcStream << std::fixed << std::setprecision(3) << leadRisk.ttcSeconds;
+            ttcText = ttcStream.str();
+        }
+
+        // CSV용 데이터 준비
+        csvFile
+            << processedFrames << ','
+            << (sceneChanged ? 1 : 0) << ','
+            << detections.size() << ','
+            << detectionStream.str() << ','
+            << trackedObjects.size() << ','
+            << trackStream.str() << ','
+            << activeLeadId << ','
+            << riskLevel << ','
+            << ttcText
+            << '\n';
 
         writer.write(frame);
     }
@@ -1075,6 +1155,7 @@ int main(int argc, char* argv[]) {
 
     capture.release();
     writer.release();
+    csvFile.close();
 
     std::cout << '\n';
     std::cout << "[SUCCESS] Step 7 장면 전환/검출 오류 보완 영상 생성 완료\n";
