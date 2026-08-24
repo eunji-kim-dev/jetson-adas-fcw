@@ -7,11 +7,10 @@
  * 3. Kalman Filter 기반 다중 객체 추적
  * 4. 내 차선 선행 차량 선택
  * 5. 바운딩박스 높이 변화 기반 TTC Proxy 계산
- * 6. 우측 탱크로리의 train 오분류를 truck으로 제한 복구
- * 7. 햇빛/자동 노출 변화와 실제 장면 전환 분리
- * 8. 원거리 도로 crop 보조 추론
- * 9. 포함형/비정상 종횡비 중복 박스 제거
- * 10. 한국어 상태 정보와 경고 문구 출력
+ * 6. 햇빛/자동 노출 변화와 실제 장면 전환 분리
+ * 7. 원거리 도로 crop 보조 추론
+ * 8. 포함형/비정상 종횡비 중복 박스 제거
+ * 9. 한국어 상태 정보와 경고 문구 출력
  *
  * 주의:
  * TTC-P는 실제 거리 센서로 계산한 TTC가 아니라
@@ -310,14 +309,6 @@ LanePosition calculateLanePosition(const std::vector<cv::Point>& trapezoid, cons
     return {true, (static_cast<float>(point.x) - leftX) / (rightX - leftX)};
 }
 
-/*
- * 우측 탱크로리 복구가 포함된 YOLO 검출 함수
- *
- * 진단 CSV에서 21초대 탱크로리는 박스 위치는 정상적으로 나오지만
- * 최고 클래스가 train(6)으로 출력되는 것이 확인
- * 이 함수는 해당 형태와 위치 조건을 만족하는 큰 우측 train 후보만
- * truck(7)으로 변경한 뒤 트래커에 전달
- */
 std::vector<Detection> detectObjects(cv::dnn::Net& net, const cv::Mat& frame, float confidenceThreshold, float nmsThreshold) {
     constexpr int inputSize = 640;
     const LetterboxResult prepared = letterbox(frame, inputSize);
@@ -335,15 +326,7 @@ std::vector<Detection> detectObjects(cv::dnn::Net& net, const cv::Mat& frame, fl
     if (firstDimension < secondDimension) predictions = predictions.t();
 
     std::vector<cv::Rect> boxes;
-    /*
-     * confidences는 실제 화면 표시와 트래커 전달용 점수
-     * nmsScores는 중복 박스 제거 우선순위에만 사용하는 점수
-     *
-     * 복구된 train 후보의 표시 점수는 최대 0.49로 제한하지만,
-     * NMS에서는 원래 강한 객체 점수를 사용해 작은 car 박스에
-     * 큰 탱크로리 박스가 밀리지 않게 함
-     */
-    std::vector<float> confidences, nmsScores;
+    std::vector<float> confidences;
     std::vector<int> classIds;
 
     for (int row = 0; row < predictions.rows; ++row) {
@@ -374,35 +357,12 @@ std::vector<Detection> detectObjects(cv::dnn::Net& net, const cv::Mat& frame, fl
 
         const int restoredWidth = right - left;
         const int restoredHeight = bottom - top;
-        const int restoredCenterX = left + restoredWidth / 2;
-        const int restoredArea = restoredWidth * restoredHeight;
 
-        /*
-         * 21초대 우측 탱크로리 train -> truck 복구 조건
-         *
-         * 실제 진단 박스보다 약간 여유 있게 설정해
-         * 프레임별 박스 흔들림 때문에 조건이 끊기는 것을 줄임
-         * 모든 train을 바꾸는 것이 아니라 우측의 큰 도로 객체만 복구
-         */
-        const bool isRightTankerMisclassifiedAsTrain = 
-            rawClassId == 6 && rawConfidence >= 0.20F &&
-            left >= static_cast<int>(frame.cols * 0.45F) &&
-            restoredCenterX >= static_cast<int>(frame.cols * 0.60F) &&
-            right >= static_cast<int>(frame.cols * 0.76F) &&
-            restoredWidth >= static_cast<int>(frame.cols * 0.18F) &&
-            restoredHeight >= static_cast<int>(frame.rows * 0.20F) &&
-            restoredArea >= static_cast<int>(static_cast<float>(frame.cols * frame.rows) * 0.055F) &&
-            bottom >= static_cast<int>(frame.rows * 0.62F);
-
-        const int finalClassId = isRightTankerMisclassifiedAsTrain ? 7 : rawClassId;
-        if (!isTargetClass(finalClassId)) continue;
-
-        const float displayConfidence = isRightTankerMisclassifiedAsTrain ? std::clamp(rawConfidence * 0.55F, 0.25F, 0.49F) : rawConfidence;
+        if (!isTargetClass(rawClassId)) continue;
 
         boxes.emplace_back(left, top, restoredWidth, restoredHeight);
-        confidences.push_back(displayConfidence);
-        nmsScores.push_back(rawConfidence);
-        classIds.push_back(finalClassId);
+        confidences.push_back(rawConfidence);
+        classIds.push_back(rawClassId);
     }
 
     std::map<int, std::vector<int>> indicesByGroup;
@@ -414,15 +374,15 @@ std::vector<Detection> detectObjects(cv::dnn::Net& net, const cv::Mat& frame, fl
     for (const auto& groupEntry : indicesByGroup) {
         const std::vector<int>& globalIndices = groupEntry.second;
         std::vector<cv::Rect> groupBoxes;
-        std::vector<float> groupNmsScores;
+        std::vector<float> groupConfidences;
 
         for (const int globalIndex : globalIndices) {
             groupBoxes.push_back(boxes[globalIndex]);
-            groupNmsScores.push_back(nmsScores[globalIndex]);
+            groupConfidences.push_back(confidences[globalIndex]);
         }
 
         std::vector<int> keptIndices;
-        cv::dnn::NMSBoxes(groupBoxes, groupNmsScores, confidenceThreshold, nmsThreshold, keptIndices);
+        cv::dnn::NMSBoxes(groupBoxes, groupConfidences, confidenceThreshold, nmsThreshold, keptIndices);
 
         for (const int localIndex : keptIndices) {
             const int globalIndex = globalIndices[localIndex];
