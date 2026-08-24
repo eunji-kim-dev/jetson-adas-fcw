@@ -16,14 +16,15 @@ find_package(OpenCV REQUIRED COMPONENTS
 )
 
 add_executable(adas
-    src/main.cpp
-    src/MultiObjectTracker.cpp
-    src/RiskAnalyzer.cpp
+    apps/fcw_demo/main.cpp
+    perception/src/MultiObjectTracker.cpp
+    adas/src/RiskAnalyzer.cpp
 )
 
 target_include_directories(adas PRIVATE
     ${OpenCV_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/perception/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adas/include
 )
 
 target_link_libraries(adas PRIVATE

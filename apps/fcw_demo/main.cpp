@@ -16,12 +16,14 @@
  * TTC-P는 실제 거리 센서로 계산한 TTC가 아니라
  * 영상 속 객체 크기 변화로 추정한 상대적인 TTC Proxy
  */
-#include "Detection.hpp"
-#include "MultiObjectTracker.hpp"
-#include "RiskAnalyzer.hpp"
+#include "perception/Detection.hpp"
+#include "perception/MultiObjectTracker.hpp"
+#include "adas/RiskAnalyzer.hpp"
+
 #include <opencv2/dnn.hpp>
 #include <opencv2/freetype.hpp>
 #include <opencv2/opencv.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
