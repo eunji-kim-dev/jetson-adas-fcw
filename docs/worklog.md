@@ -118,3 +118,31 @@
 - `perception_demo`를 추가해서 `adas_fcw` 없이도 Detection/Tracking만 링크·실행되는지 확인함
 - 같은 기준 영상을 다시 실행해서 baseline MD5가 `a0006c4a16dbe3f69c178fbc5c1b6b8e`와 동일한지 확인함
 - 이상 없으면 타깃 분리 작업을 커밋함
+
+## 2026-08-25
+
+### 1. CMake 타깃 분리 및 perception_demo 추가
+- 최상위 CMakeLists.txt는 전체 설정과 perception / adas / apps 연결만 담당하도록 단순화
+- 각 폴더에 별도의 CMakeLists.txt 추가
+- 코드를 다음과 같이 빌드 단위로 분리
+  - perception_core: 객체 인식·추적 기능
+  - adas_fcw: FCW 위험 판단 기능
+  - adas: 실제 ADAS 실행 프로그램
+  - perception_demo: perception만 따로 실행해보는 테스트 프로그램
+- 의존 관계를 adas → adas_fcw → perception_core 순서로 고정
+- perception_core에는 필요한 OpenCV 모듈만 연결하고, DNN·한글 출력·영상 입출력 등은 필요한 앱 쪽에서 연결
+- perception 코드에서 일부러 adas/RiskAnalyzer.hpp를 include해 빌드 테스트
+  - 헤더를 찾지 못해 컴파일 실패하는 것 확인
+  - 즉 perception → adas 방향으로는 접근할 수 없음을 확인
+  - 테스트 후 해당 include는 삭제하고 정상 재빌드
+- perception_demo를 ADAS 없이 실행해 전체 1252프레임 처리 성공
+- 기존 ADAS 결과 CSV의 MD5도 이전과 동일한 것 확인
+  - a0006c4a16dbe3f69c178fbc5c1b6b8e
+
+### 이 작업을 한 이유
+- perception과 adas를 폴더만 나누는 게 아니라, 실제 빌드 단계에서도 서로 역할을 분리하기 위해
+- perception은 객체를 인식하고 추적하는 기능만 담당하고, adas는 그 결과를 받아 FCW 위험 판단만 하도록 만들기 위해
+- 나중에 ROS2나 다른 로봇 프로젝트에서도 perception_core를 ADAS와 상관없이 재사용할 수 있게 하기 위해
+- 잘못된 방향인 perception → adas 의존성이 생기지 않도록 CMake가 직접 막게 하기 위해
+- 9월 Jetson으로 옮길 때 전체 구조를 다시 뜯어고치지 않고, 필요한 앱 쪽 설정만 수정할 수 있게 하기 위해
+- 리팩터링 과정에서 기존 ADAS 결과가 바뀌지 않았는지 MD5로 확인하기 위해
