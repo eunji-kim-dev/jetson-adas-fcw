@@ -20,6 +20,7 @@
 #include "perception/Detection.hpp"
 #include "perception/MultiObjectTracker.hpp"
 #include "perception/YoloDetector.hpp"
+#include "adas/LeadSelector.hpp"
 #include "adas/RiskAnalyzer.hpp"
 #include <opencv2/freetype.hpp>
 #include <opencv2/opencv.hpp>
@@ -39,25 +40,6 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
-
-struct LanePosition {
-    bool inside = false;
-    float normalizedX = 0.5F;
-};
-
-struct ObjectGeometry {
-    cv::Point groundPoint;
-    bool insideRoad = false;
-    bool insideEgoLane = false;
-
-    // ego lane 경계를 순간적으로 벗어나도 위험 분석 이력은 잠시 유지
-    // 새 LEAD 후보 선정에는 쓰지 않고 기존 LEAD/분석 이력 보존에만 사용
-    bool laneHeld = false;
-
-    float normalizedLaneX = 0.5F;
-    float leadScore = -std::numeric_limits<float>::infinity();
-    bool passingBy = false;
-};
 
 /*
  * 편집된 테스트 영상의 장면 전환을 감지
@@ -239,24 +221,6 @@ std::string getRiskNameKorean(RiskLevel level) {
     return "알 수 없음";
 }
 
-LanePosition calculateLanePosition(const std::vector<cv::Point>& trapezoid, const cv::Point& point) {
-    if (trapezoid.size() != 4) return {};
-
-    const float topY = (static_cast<float>(trapezoid[0].y) + static_cast<float>(trapezoid[1].y)) / 2.0F;
-    const float bottomY = (static_cast<float>(trapezoid[2].y) + static_cast<float>(trapezoid[3].y)) / 2.0F;
-
-    // 화면 하단까지 내려온 가까운 차량은 bottomY 아래라고 차선 밖으로 버리지 않음
-    // verticalRatio가 아래에서 1.0으로 clamp되므로 하단 경계 기준으로 판정 가능
-    if (point.y < topY || bottomY <= topY) return {};
-
-    const float verticalRatio = std::clamp((static_cast<float>(point.y) - topY) / (bottomY - topY), 0.0F, 1.0F);
-    const float leftX = static_cast<float>(trapezoid[0].x) + (static_cast<float>(trapezoid[3].x) - static_cast<float>(trapezoid[0].x)) * verticalRatio;
-    const float rightX = static_cast<float>(trapezoid[1].x) + (static_cast<float>(trapezoid[2].x) - static_cast<float>(trapezoid[1].x)) * verticalRatio;
-
-    if (point.x < leftX || point.x > rightX || rightX <= leftX) return {};
-    return {true, (static_cast<float>(point.x) - leftX) / (rightX - leftX)};
-}
-
 void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const std::string& text, int y, int fontHeight, const cv::Scalar& color) {
     int baseline = 0;
     const cv::Size textSize = renderer.getTextSize(text, fontHeight, -1, &baseline);
@@ -340,24 +304,8 @@ int main(int argc, char* argv[]) {
     };
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
+    LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps);
     RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60);
-
-    int activeLeadId = -1;
-    // 동영상 35초 길가 트럭이 잠깐 ego lane에 들어와 바로 LEAD가 되는 문제 방지
-    std::unordered_map<int, int> egoLaneStreakById;
-    // ego lane 경계를 한두 프레임 벗어나도 기존 분석 이력을 바로 지우지 않기 위한 유예
-    std::unordered_map<int, int> egoLaneGraceById;
-    
-    const int egoLaneGraceFrames = std::max(3, static_cast<int>(std::round(sourceFps * 0.15)));
-    const int leadEligibilityFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
-
-    // 추월하면서 옆으로 빠지는 차량과 실제 정면 선행 차량을 구분하기 위한 횡방향 이력
-    std::unordered_map<int, std::deque<float>> lateralHistoryById;
-    constexpr std::size_t lateralHistorySize = 8;
-    constexpr float maximumLateralDriftPerFrame = 0.02F;
-    // 컷인 차량은 정의상 ego lane에 방금 들어온 차량이므로
-    // 일반 LEAD의 0.5초 체류 조건보다 짧은 조건을 사용
-    const int cutInEligibilityFrames = std::max(4, static_cast<int>(std::round(sourceFps * 0.15)));
 
     /*
      * 경고가 한두 프레임 만에 사라져 깜빡이는 현상을 줄이기 위한
@@ -416,11 +364,10 @@ int main(int argc, char* argv[]) {
             cautionHoldRemaining = 0; dangerHoldRemaining = 0;
             cautionCandidateFrames = 0; dangerCandidateFrames = 0;
             warningCandidateLeadId = -1;
-            activeLeadId = -1;
             sceneWarmupRemaining = sceneWarmupFrames;
 
-            // 새 장면에서는 이전 장면의 lane 체류/횡이동 이력을 사용하지 않음
-            egoLaneStreakById.clear(); egoLaneGraceById.clear(); lateralHistoryById.clear();
+            // 새 장면에서는 이전 장면의 LEAD/lane 체류/횡이동 이력을 사용하지 않음
+            leadSelector.reset();
             // 이전 장면의 Kalman Track과 TTC-P 이력을 새 장면으로 넘기지 않음
             // nextTrackId_는 tracker.reset() 안에서 유지되어 ID는 실행 전체에서 유일함
             tracker.reset(); riskAnalyzer.reset();
@@ -460,92 +407,9 @@ int main(int argc, char* argv[]) {
         std::cout << std::fixed << std::setprecision(2) << "[PERF] frame=" << processedFrames << " | Full YOLO=" << fullYoloMilliseconds << " ms" << " | Far YOLO=" << farYoloMilliseconds << " ms" << " | Post=" << postprocessMilliseconds << " ms" << " | Total=" << inferenceMilliseconds << " ms" << " | AVG=" << averageInferenceMilliseconds << " ms\n";
 
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
-        std::unordered_map<int, ObjectGeometry> geometryById;
-        std::unordered_map<int, float> leadScoreById;
-        int proposedLeadId = -1;
-        float proposedLeadScore = -std::numeric_limits<float>::infinity();
-
-        // 먼저 모든 객체의 접지점과 차선 위치를 계산하고
-        // 내 차선에서 가장 가까운 선행 차량 후보를 선택
-        for (const TrackedObject& trackedObject : trackedObjects) {
-            const cv::Rect& box = trackedObject.box;
-            const cv::Point groundPoint(box.x + box.width / 2, box.y + box.height);
-            const bool insideRoad = cv::pointPolygonTest(roadRoi, groundPoint, false) >= 0.0;
-            const LanePosition lanePosition = calculateLanePosition(egoLaneRoi, groundPoint);
-
-            // 새 LEAD 진입 조건은 엄격하게 유지하되,
-            // 이미 lane 안에 있던 차량이 경계를 잠깐 넘는 경우 이력은 유예 기간 동안 보존
-            int& laneStreak = egoLaneStreakById[trackedObject.trackId];
-            int& laneGrace = egoLaneGraceById[trackedObject.trackId];
-
-            if (lanePosition.inside) {
-                ++laneStreak;
-                laneGrace = egoLaneGraceFrames;
-            } else if (laneGrace > 0) {
-                --laneGrace;
-            } else {
-                laneStreak = 0;
-            }
-
-            const bool laneHeld = lanePosition.inside || laneGrace > 0;
-            // lane 중앙에서 바깥쪽으로 이동하면 passing-by,
-            // 반대로 중앙으로 빠르게 접근하면 cutting-in으로 판단
-            auto& lateralHistory = lateralHistoryById[trackedObject.trackId];
-
-            if (lanePosition.inside) {
-                lateralHistory.push_back(lanePosition.normalizedX);
-                if (lateralHistory.size() > lateralHistorySize) lateralHistory.pop_front();
-            } else if (!laneHeld) {
-                lateralHistory.clear();
-            }
-
-            float outwardDriftPerFrame = 0.0F;
-            if (lateralHistory.size() >= 4) {
-                const float pastOffset = std::abs(lateralHistory.front() - 0.5F);
-                const float recentOffset = std::abs(lateralHistory.back() - 0.5F);
-                outwardDriftPerFrame = (recentOffset - pastOffset) / static_cast<float>(lateralHistory.size() - 1);
-            }
-
-            const bool passingBy = outwardDriftPerFrame > maximumLateralDriftPerFrame;
-            const bool cuttingIn = outwardDriftPerFrame < -maximumLateralDriftPerFrame;
-            const int requiredStreak = cuttingIn ? cutInEligibilityFrames : leadEligibilityFrames;
-            float leadScore = -std::numeric_limits<float>::infinity();
-
-            if (lanePosition.inside && isVehicleClass(trackedObject.classId) && laneStreak >= requiredStreak) {
-                const float centerPenalty = std::abs(lanePosition.normalizedX - 0.5F) * 90.0F;
-                leadScore = static_cast<float>(groundPoint.y) - centerPenalty;
-                leadScoreById[trackedObject.trackId] = leadScore;
-
-                if (leadScore > proposedLeadScore) {
-                    proposedLeadScore = leadScore;
-                    proposedLeadId = trackedObject.trackId;
-                }
-            }
-            geometryById[trackedObject.trackId] = {groundPoint, insideRoad, lanePosition.inside, laneHeld, lanePosition.normalizedX, leadScore, passingBy};
-        }
-
-        // 이번 프레임에 보이지 않는 Track의 lane 체류/횡이동 이력은 제거
-        for (auto iterator = egoLaneStreakById.begin(); iterator != egoLaneStreakById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) iterator = egoLaneStreakById.erase(iterator);
-            else ++iterator;
-        }
-        for (auto iterator = egoLaneGraceById.begin(); iterator != egoLaneGraceById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) iterator = egoLaneGraceById.erase(iterator);
-            else ++iterator;
-        }
-        for (auto iterator = lateralHistoryById.begin(); iterator != lateralHistoryById.end();) {
-            if (geometryById.find(iterator->first) == geometryById.end()) iterator = lateralHistoryById.erase(iterator);
-            else ++iterator;
-        }
-
-        const auto activeLeadIterator = leadScoreById.find(activeLeadId);
-        const bool activeLeadVisible = activeLeadIterator != leadScoreById.end();
-
-        // 장면 전환 직후에는 선행 차량을 바로 선택하지 않음
-        // 새 장면에서 추적 정보가 다시 안정화된 뒤에만 선택
-        if (!riskAnalysisEnabled) activeLeadId = -1;
-        else if (!activeLeadVisible) activeLeadId = proposedLeadId;
-        else if (proposedLeadId >= 0 && proposedLeadId != activeLeadId && proposedLeadScore > activeLeadIterator->second + 35.0F) activeLeadId = proposedLeadId;
+        leadSelector.update(trackedObjects, riskAnalysisEnabled);
+        const int activeLeadId = leadSelector.activeLeadId();
+        const std::unordered_map<int, ObjectGeometry>& geometryById = leadSelector.geometryById();
 
         cv::Mat overlay = frame.clone();
         cv::fillConvexPoly(overlay, roadRoi, cv::Scalar(0, 255, 0));
