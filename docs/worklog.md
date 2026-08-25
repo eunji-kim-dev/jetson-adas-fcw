@@ -146,3 +146,31 @@
 - 잘못된 방향인 perception → adas 의존성이 생기지 않도록 CMake가 직접 막게 하기 위해
 - 9월 Jetson으로 옮길 때 전체 구조를 다시 뜯어고치지 않고, 필요한 앱 쪽 설정만 수정할 수 있게 하기 위해
 - 리팩터링 과정에서 기존 ADAS 결과가 바뀌지 않았는지 MD5로 확인하기 위해
+
+### 2. 검출 기능을 perception으로 이동 (YoloDetector 분리)
+- 기존 `main.cpp` 안에 있던 객체 검출 코드를 `perception`으로 이동
+  - 이미지 크기 맞추기(letterbox)
+  - YOLO 객체 검출
+  - 멀리 있는 차량을 보기 위한 crop 추가 검출
+  - 겹치는 박스 정리(NMS)
+  - 중복 박스 제거
+  - 너무 작은 객체 제거
+- 위 검출 과정을 `YoloDetector`라는 하나의 클래스로 묶음
+- YOLO 모델을 실행하는 `cv::dnn::Net`도 `YoloDetector` 내부에서 관리하도록 변경
+- 차량/사람 등의 클래스 종류를 판단하는 기능은 `Classes.hpp`로 따로 분리
+- 기존 성능 측정 로그 `[PERF]`가 바뀌지 않도록 각 검출 단계의 시간을 `DetectionTiming`으로 반환
+- `perception_demo`에도 실제 YOLO 검출을 연결
+  - 이제 `ADAS` 없이도 `Detection → Tracking`까지 실제로 실행 가능
+- 기존 ADAS 결과와 MD5가 같은지 확인
+  - `a0006c4a16dbe3f69c178fbc5c1b6b8e`
+
+### 이 작업을 한 이유
+- 객체 검출 코드가 `main.cpp` 안에 있으면 다른 프로그램에서 검출 기능만 따로 사용할 수 없기 때문
+- `Detection + Tracking`을 ADAS와 상관없이 사용할 수 있어야 `perception`이 독립된 모듈이 됨
+- YOLO 실행 부분을 `YoloDetector` 안에 넣어두면 나중에 OpenCV DNN을 TensorRT로 바꿀 때 **검출기 내부만 수정하고 사용하는 쪽 코드는 그대로 둘 수 있음**
+- 차량인지 사람인지 판단하는 공통 기능을 `Classes.hpp`로 빼두면 이후 `adas`에서도 `main.cpp`에 의존하지 않고 사용할 수 있음
+
+### 알게 된 점
+- 커밋하기 전에는 반드시 빌드와 baseline 검증을 먼저 해야 함
+- 여러 변경사항을 한 번에 섞어서 커밋하기보다 **하나의 작업이 정상 동작하는 상태에서 커밋하는 것이 좋음**
+- 이렇게 해야 나중에 결과가 잘못됐을 때 **어느 변경부터 문제가 생겼는지 추적하기 쉬움**
