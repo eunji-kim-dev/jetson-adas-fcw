@@ -1,6 +1,7 @@
 add_library(adas_fcw STATIC
     src/LeadSelector.cpp
     src/RiskAnalyzer.cpp
+    src/WarningPolicy.cpp
 )
 
 target_include_directories(adas_fcw PUBLIC

@@ -21,6 +21,7 @@
 #include "perception/MultiObjectTracker.hpp"
 #include "perception/YoloDetector.hpp"
 #include "adas/LeadSelector.hpp"
+#include "adas/WarningPolicy.hpp"
 #include "adas/RiskAnalyzer.hpp"
 #include <opencv2/freetype.hpp>
 #include <opencv2/opencv.hpp>
@@ -305,35 +306,8 @@ int main(int argc, char* argv[]) {
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
     LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps);
+    WarningPolicy warningPolicy(sourceFps, height);
     RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60);
-
-    /*
-     * 경고가 한두 프레임 만에 사라져 깜빡이는 현상을 줄이기 위한
-     * 상단 경고 유지 시간
-     *
-     * 기존 0.4초보다 조금 줄여 정상 상태로 돌아온 뒤
-     * 오래 남아 보이지 않도록 0.25초로 조정
-     */
-    const int warningHoldFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.25)));
-    // 시간 기반 위험 조건(샘플 수, 크기, 증가율, 접근 속도)은 RiskAnalyzer가 담당
-    // main.cpp에는 화면 기하 조건만 남김
-    const int minimumLeadGroundYForWarning = static_cast<int>(std::round(height * 0.60));
-
-    int cautionHoldRemaining = 0, dangerHoldRemaining = 0;
-
-    /*
-     * RiskAnalyzer 자체의 안정화 외에도,
-     * 상단의 큰 경고 배너는 같은 선행 차량에서 위험 신호가
-     * 일정 프레임 이상 연속될 때만 표시
-     *
-     * 10.57초부터 장면이 바뀌기 전까지는 주의 상태가 약 5프레임만
-     * 나타났으므로, 8프레임 연속 확인 조건을 적용하면
-     * 이런 짧은 오경고가 상단에 뜨지 않음
-     */
-    constexpr int cautionConfirmationFrames = 8;
-    constexpr int dangerConfirmationFrames = 3;
-    int cautionCandidateFrames = 0, dangerCandidateFrames = 0;
-    int warningCandidateLeadId = -1;
 
     /*
      * 장면 전환 직후에는 이전 장면의 추적과 TTC-P 이력이
@@ -361,9 +335,7 @@ int main(int argc, char* argv[]) {
 
         if (sceneChanged) {
             // 이전 장면에서 유지 중이던 경고를 즉시 제거
-            cautionHoldRemaining = 0; dangerHoldRemaining = 0;
-            cautionCandidateFrames = 0; dangerCandidateFrames = 0;
-            warningCandidateLeadId = -1;
+            warningPolicy.reset();
             sceneWarmupRemaining = sceneWarmupFrames;
 
             // 새 장면에서는 이전 장면의 LEAD/lane 체류/횡이동 이력을 사용하지 않음
@@ -436,16 +408,7 @@ int main(int argc, char* argv[]) {
             
             const RiskResult rawRisk = riskAnalyzer.update(trackedObject, isAnalysisTarget, isLeadTarget, processedFrames);
             
-            // 시간 기반 조건은 RiskAnalyzer에서 이미 판단했으므로
-            // main.cpp에서는 화면 위치와 passing-by 여부만 검사한다.
-            const bool geometryAllowsWarning = isLeadTarget && (rawRisk.truncated || geometry.groundPoint.y >= minimumLeadGroundYForWarning) && !geometry.passingBy;
-
-            RiskResult risk = rawRisk;
-            if (risk.level != RiskLevel::Safe && !geometryAllowsWarning) {
-                risk.level = RiskLevel::Safe;
-                risk.valid = false;
-                risk.ttcSeconds = std::numeric_limits<float>::infinity();
-            }
+            const RiskResult risk = warningPolicy.applyGeometryGate(rawRisk, geometry, isLeadTarget);
 
             if (isLeadTarget) {
                 leadRisk = risk;
@@ -524,44 +487,7 @@ int main(int argc, char* argv[]) {
 
         riskAnalyzer.removeStaleTracks(processedFrames);
 
-        /*
-         * 상단 경고 배너는 다음 세 단계를 모두 통과해야 표시
-         * 1. 장면 전환 직후의 분석 대기 시간이 아닐 것
-         * 2. 같은 선행 차량에서 위험 상태가 연속으로 관찰될 것
-         * 3. CAUTION은 8프레임, DANGER는 3프레임 이상 지속될 것
-         *
-         * 장면이 바뀌면 이전 경고 유지 카운터를 즉시 0으로 만들기 때문에,
-         * 새 화면에 차량이 없는데 이전 장면의 경고가 남는 현상이 사라짐
-         */
-        if (!riskAnalysisEnabled || sceneChanged) {
-            cautionHoldRemaining = 0; dangerHoldRemaining = 0;
-            cautionCandidateFrames = 0; dangerCandidateFrames = 0;
-            warningCandidateLeadId = -1;
-        } else if (leadRiskFound && activeLeadId >= 0) {
-            // 선행 차량 ID가 바뀌면 이전 차량에서 쌓인
-            // 위험 연속 프레임 수를 이어받지 않음
-            if (warningCandidateLeadId != activeLeadId) {
-                warningCandidateLeadId = activeLeadId;
-                cautionCandidateFrames = 0; dangerCandidateFrames = 0;
-            }
-
-            if (leadRisk.level == RiskLevel::Danger) {
-                ++dangerCandidateFrames; cautionCandidateFrames = 0;
-                if (dangerCandidateFrames >= dangerConfirmationFrames) { dangerHoldRemaining = warningHoldFrames; cautionHoldRemaining = 0; }
-            } else if (leadRisk.level == RiskLevel::Caution) {
-                ++cautionCandidateFrames; dangerCandidateFrames = 0;
-                if (cautionCandidateFrames >= cautionConfirmationFrames) cautionHoldRemaining = warningHoldFrames;
-                if (dangerHoldRemaining > 0) --dangerHoldRemaining;
-            } else {
-                cautionCandidateFrames = 0; dangerCandidateFrames = 0;
-                if (dangerHoldRemaining > 0) --dangerHoldRemaining;
-                if (cautionHoldRemaining > 0) --cautionHoldRemaining;
-            }
-        } else {
-            warningCandidateLeadId = -1; cautionCandidateFrames = 0; dangerCandidateFrames = 0;
-            if (dangerHoldRemaining > 0) --dangerHoldRemaining;
-            if (cautionHoldRemaining > 0) --cautionHoldRemaining;
-        }
+        warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level);
 
         // 장면 전환 직후의 위험 분석 대기 시간을 한 프레임 줄임
         if (sceneWarmupRemaining > 0) --sceneWarmupRemaining;
@@ -579,8 +505,8 @@ int main(int argc, char* argv[]) {
 
         koreanText.putText(frame, leadStatus, cv::Point(30, 136), 25, cv::Scalar(255, 255, 255));
 
-        if (dangerHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "위험: 충돌 가능성 높음", 58, 34, cv::Scalar(0, 0, 255));
-        else if (cautionHoldRemaining > 0) drawCenteredKoreanText(koreanText, frame, "주의: 선행 차량 접근 중", 58, 31, cv::Scalar(0, 255, 255));
+        if (warningPolicy.bannerLevel() == RiskLevel::Danger) drawCenteredKoreanText(koreanText, frame, "위험: 충돌 가능성 높음", 58, 34, cv::Scalar(0, 0, 255));
+        else if (warningPolicy.bannerLevel() == RiskLevel::Caution) drawCenteredKoreanText(koreanText, frame, "주의: 선행 차량 접근 중", 58, 31, cv::Scalar(0, 255, 255));
 
         
         auto sortedDetections = detections;
