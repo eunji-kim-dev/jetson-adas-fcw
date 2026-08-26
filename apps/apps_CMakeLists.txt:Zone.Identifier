@@ -1,4 +1,0 @@
-[ZoneTransfer]
-ZoneId=3
-ReferrerUrl=https://claude.ai/chat/5e06ab5d-5df0-445e-9dab-000be9adc93f
-HostUrl=https://claude.ai/api/organizations/05a79165-36da-42d4-9955-edbd6ab56acf/conversations/5e06ab5d-5df0-445e-9dab-000be9adc93f/wiggle/download-files?paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2Fmain.cpp&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2FYoloDetector.cpp&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2FYoloDetector.hpp&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2FClasses.hpp&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2Fperception_demo_main.cpp&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2Fperception_CMakeLists.txt&paths=%2Fmnt%2Fuser-data%2Foutputs%2Fstep4%2Fapps_CMakeLists.txt
