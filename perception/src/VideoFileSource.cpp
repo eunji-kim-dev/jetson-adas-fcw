@@ -36,6 +36,7 @@ bool VideoFileSource::read(Frame& frame) {
     } else {
         frame.captureTimestampNs = static_cast<std::int64_t>(std::llround(static_cast<double>(frame.frameSeq) * 1.0e9 / fps_));
     }
+    frame.captureTimestampClock = CaptureTimestampClock::Stream;
     frame.captureTimestampSource = CaptureTimestampSource::VideoPts;
 
     return true;

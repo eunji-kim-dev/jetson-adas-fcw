@@ -27,6 +27,8 @@
 #include "adas/LeadSelector.hpp"
 #include "adas/WarningPolicy.hpp"
 #include "adas/RiskAnalyzer.hpp"
+#include "logging/RunLogger.hpp"
+#include "RunOptions.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/freetype.hpp>
 #include <opencv2/imgproc.hpp>
@@ -237,27 +239,10 @@ void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const 
 }
 
 int main(int argc, char* argv[]) {
-    // 사용법: adas [입력 영상 경로] [--backend opencv_dnn]
-    std::string inputPath = "videos/input.mp4";
-    std::string backendName = "opencv_dnn";
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string argument = argv[i];
-        if (argument == "--backend") {
-            if (i + 1 >= argc) {
-                std::cerr << "[ERROR] --backend 옵션에 값이 없음 (예: --backend opencv_dnn)\n";
-                return 1;
-            }
-            backendName = argv[++i];
-        } else if (argument.rfind("--backend=", 0) == 0) {
-            backendName = argument.substr(std::string("--backend=").size());
-        } else if (argument.rfind("--", 0) == 0) {
-            std::cerr << "[ERROR] 알 수 없는 옵션: " << argument << "\n사용법: adas [입력 영상 경로] [--backend opencv_dnn]\n";
-            return 1;
-        } else {
-            inputPath = argument;
-        }
-    }
+    RunOptions options;
+    if (!parseRunOptions(argc, argv, "adas", options)) return 1;
+    const std::string& inputPath = options.inputPath;
+    const std::string& backendName = options.backendName;
 
     const std::string modelPath = "models/yolov8n.onnx";
     const std::string inputStem = std::filesystem::path(inputPath).stem().string();
@@ -354,6 +339,41 @@ int main(int argc, char* argv[]) {
     const int sceneWarmupFrames = std::max(1, static_cast<int>(std::round(sourceFps * 0.5)));
     int sceneWarmupRemaining = 0;
 
+    // 실행 로그 (results/runs/<run_id>/raw_frame_log.csv, run_summary.json)
+    RunMetadata runMetadata;
+    runMetadata.runId = options.runId.empty() ? RunLogger::defaultRunId(inputStem, backendName) : options.runId;
+    runMetadata.powerMode = options.powerMode;
+    runMetadata.backend = backendName;
+    runMetadata.precision = "fp32";
+    runMetadata.opencvVersion = CV_VERSION;
+    runMetadata.inputSource = "video_file";
+    runMetadata.inputName = inputPath;
+    runMetadata.inputHash = RunLogger::hashFile(inputPath);
+    runMetadata.resolution = std::to_string(width) + "x" + std::to_string(height);
+    runMetadata.sourceFps = sourceFps;
+    runMetadata.captureTsClock = toString(CaptureTimestampClock::Stream);
+    runMetadata.captureTsSource = toString(CaptureTimestampSource::VideoPts);
+    runMetadata.model = modelPath;
+    runMetadata.modelHash = RunLogger::hashFile(modelPath);
+    runMetadata.fullCropStrategy = "full+crop_every_frame";
+    runMetadata.detectionInterval = 1;
+    runMetadata.confidenceThreshold = detectorThreshold;
+    runMetadata.nmsThreshold = nmsThreshold;
+    runMetadata.warmupFrames = options.warmupFrames;
+    runMetadata.measuredFrames = options.measuredFrames;
+    runMetadata.deadlineMs = 1000.0 / sourceFps;
+
+    std::unique_ptr<RunLogger> runLoggerPtr;
+    try {
+        runLoggerPtr = std::make_unique<RunLogger>("results/runs", runMetadata);
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] 실행 로그 생성 실패\n" << error.what() << '\n';
+        return 1;
+    }
+    RunLogger& runLogger = *runLoggerPtr;
+    std::cout << "[INFO] 실행 로그: " << runLogger.runDirectory() << " (git " << runLogger.gitCommit().substr(0, 12) << (runLogger.gitDirty() ? ", dirty" : "") << ")\n";
+    if (runLogger.gitDirty()) std::cout << "[WARN] working tree 가 dirty 상태 — 이 실행의 측정값은 baseline 으로 쓰지 않음\n";
+
     SceneChangeDetector sceneChangeDetector;
     Frame captured;
     int processedFrames = 0;
@@ -361,8 +381,10 @@ int main(int argc, char* argv[]) {
 
     const auto totalStart = std::chrono::steady_clock::now();
 
+    auto readStart = std::chrono::steady_clock::now();
     while (source.read(captured)) {
-        // 이후 코드는 프레임 이미지만 사용하고, frameSeq / captureTimestamp는 아직 쓰지 않음
+        // 프레임이 앱 손에 들어온 순간 (파일: 디코더 반환, 카메라: DQBUF 반환)
+        const auto dequeueTime = std::chrono::steady_clock::now();
         cv::Mat& frame = captured.image;
         ++processedFrames;
 
@@ -388,6 +410,7 @@ int main(int argc, char* argv[]) {
             // 실제 컷이 아니라 전역 밝기/자동 노출 변화로 걸러진 상태
             std::cout << "[EXPOSURE CHANGE] frame=" << processedFrames << " diff=" << std::fixed << std::setprecision(2) << sceneDifference << " histogram=" << sceneHistogramCorrelation << " shiftRatio=" << sceneShiftRatio << " compensatedDiff=" << sceneCompensatedDifference << '\n';
         }
+        const auto sceneEnd = std::chrono::steady_clock::now();
 
         const bool riskAnalysisEnabled = sceneWarmupRemaining <= 0;
         const auto inferenceStart = std::chrono::steady_clock::now();
@@ -415,7 +438,10 @@ int main(int argc, char* argv[]) {
         const double averageInferenceMilliseconds = totalInferenceMilliseconds / static_cast<double>(processedFrames);
         std::cout << std::fixed << std::setprecision(2) << "[PERF] frame=" << processedFrames << " | Full YOLO=" << fullYoloMilliseconds << " ms" << " | Far YOLO=" << farYoloMilliseconds << " ms" << " | Post=" << postprocessMilliseconds << " ms" << " | Total=" << inferenceMilliseconds << " ms" << " | AVG=" << averageInferenceMilliseconds << " ms\n";
 
+        const auto trackingStart = std::chrono::steady_clock::now();
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
+        const auto trackingEnd = std::chrono::steady_clock::now();
+
         leadSelector.update(trackedObjects, riskAnalysisEnabled);
         const int activeLeadId = leadSelector.activeLeadId();
         const std::unordered_map<int, ObjectGeometry>& geometryById = leadSelector.geometryById();
@@ -525,6 +551,8 @@ int main(int argc, char* argv[]) {
         riskAnalyzer.removeStaleTracks(processedFrames);
 
         warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level);
+        // 이 프레임의 판정(경고 배너)이 확정된 순간
+        const auto decisionTime = std::chrono::steady_clock::now();
 
         // 장면 전환 직후의 위험 분석 대기 시간을 한 프레임 줄임
         if (sceneWarmupRemaining > 0) --sceneWarmupRemaining;
@@ -614,7 +642,49 @@ int main(int argc, char* argv[]) {
             << '\n';
 
         writer.write(frame);
+        const auto outputEnd = std::chrono::steady_clock::now();
+
+        // 실행 로그 한 행 — 어느 측정 구간에도 포함되지 않도록 모든 시각을 잰 뒤에 기록
+        FrameRecord record;
+        record.frame = processedFrames;
+        record.frameSeq = captured.frameSeq;
+        record.captureTsNs = captured.captureTimestampNs;
+        record.captureTsClock = toString(captured.captureTimestampClock);
+        record.captureTsSource = toString(captured.captureTimestampSource);
+        record.dequeueTsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(dequeueTime.time_since_epoch()).count();
+        record.decisionTsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(decisionTime.time_since_epoch()).count();
+        record.captureMs = std::chrono::duration<double, std::milli>(dequeueTime - readStart).count();
+        record.sceneMs = std::chrono::duration<double, std::milli>(sceneEnd - dequeueTime).count();
+        record.preprocessFullMs = detectionTiming.fullInference.preprocessMilliseconds;
+        record.inferenceFullMs = detectionTiming.fullInference.inferenceMilliseconds;
+        record.postprocessFullMs = detectionTiming.fullInference.postprocessMilliseconds;
+        record.preprocessCropMs = detectionTiming.farInference.preprocessMilliseconds;
+        record.inferenceCropMs = detectionTiming.farInference.inferenceMilliseconds;
+        record.postprocessCropMs = detectionTiming.farInference.postprocessMilliseconds;
+        record.mergeMs = postprocessMilliseconds;
+        record.detectMs = inferenceMilliseconds;
+        record.trackingMs = std::chrono::duration<double, std::milli>(trackingEnd - trackingStart).count();
+        record.decisionMs = std::chrono::duration<double, std::milli>(decisionTime - trackingEnd).count();
+        record.totalProcessingMs = std::chrono::duration<double, std::milli>(decisionTime - dequeueTime).count();
+        record.outputMs = std::chrono::duration<double, std::milli>(outputEnd - decisionTime).count();
+        record.deadlineMiss = record.totalProcessingMs > runMetadata.deadlineMs;
+        record.detections = static_cast<int>(detections.size());
+        record.tracks = static_cast<int>(trackedObjects.size());
+        record.leadId = activeLeadId;
+        record.leadFound = leadRiskFound;
+        if (leadRiskFound && leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) record.ttcP = leadRisk.ttcSeconds;
+        record.riskState = riskLevel;
+        record.warningState = RiskAnalyzer::toString(warningPolicy.bannerLevel());
+        record.sceneChanged = sceneChanged;
+        runLogger.writeFrame(record);
+
+        // --measured-frames: warmup + 측정 프레임 수를 채우면 정지 (반복 측정용)
+        if (options.measuredFrames > 0 && processedFrames >= options.warmupFrames + options.measuredFrames) break;
+
+        readStart = std::chrono::steady_clock::now();
     }
+
+    runLogger.finish();
 
     const auto totalEnd = std::chrono::steady_clock::now();
     const double elapsedSeconds = std::chrono::duration<double>(totalEnd - totalStart).count();
@@ -638,6 +708,7 @@ int main(int argc, char* argv[]) {
     std::cout << "추론 기준 FPS: " << std::fixed << std::setprecision(2) << inferenceFps << " FPS\n";
     std::cout << "전체 처리 속도: " << std::fixed << std::setprecision(2) << processingFps << " FPS\n";
     std::cout << "결과 파일: " << outputPath << '\n';
+    std::cout << "실행 로그: " << runLogger.runDirectory() << '\n';
 
     return 0;
 }

@@ -16,6 +16,7 @@ class VideoCapture;
  * - frameSeq           : 읽은 순서대로 0부터 증가
  * - captureTimestampNs : 방금 읽은 프레임의 컨테이너 PTS(CAP_PROP_POS_MSEC)를 ns로 변환
  *                        백엔드가 PTS를 주지 않으면 frameSeq / fps 로 계산
+ * - captureTimestampClock  : 항상 Stream (PTS는 monotonic 축이 아님)
  * - captureTimestampSource : 항상 VideoPts
  *
  * cv::VideoCapture는 전방 선언 + unique_ptr로 감춰서

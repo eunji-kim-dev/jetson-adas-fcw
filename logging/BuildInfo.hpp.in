@@ -1,0 +1,8 @@
+#pragma once
+
+// cmake --build 시점에 logging/cmake/GitInfo.cmake 가 생성하는 파일
+// 직접 수정하지 말 것. 내용이 바뀔 때만 다시 써서 불필요한 재컴파일을 피함.
+#define BUILD_INFO_GIT_COMMIT "@GIT_COMMIT@"
+#define BUILD_INFO_GIT_DIRTY @GIT_DIRTY@
+#define BUILD_INFO_BUILD_TYPE "@BUILD_TYPE@"
+#define BUILD_INFO_COMPILER "@COMPILER@"

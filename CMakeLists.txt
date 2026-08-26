@@ -25,4 +25,5 @@ find_package(OpenCV REQUIRED COMPONENTS
 # 각 모듈의 빌드 설정은 해당 디렉터리의 CMakeLists.txt에서 관리한다.
 add_subdirectory(perception)
 add_subdirectory(adas)
+add_subdirectory(logging)
 add_subdirectory(apps)

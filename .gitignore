@@ -13,6 +13,9 @@ results/*.avi
 results/*.mp4
 results/*_frames.csv
 
+# 실행 로그 (raw_frame_log.csv / run_summary.json)
+results/runs/
+
 # AI 모델 파일 제외
 *.onnx
 

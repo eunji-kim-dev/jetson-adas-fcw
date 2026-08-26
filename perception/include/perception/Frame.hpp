@@ -27,6 +27,31 @@ inline std::string toString(CaptureTimestampSource source) {
 }
 
 /*
+ * captureTimestampNs가 어느 클럭 위의 값인지
+ *
+ * 분석 코드는 "decision_ts(steady_clock)와 같은 축인가"만 알면 되고
+ * 그 답이 이 값이다. source 이름에서 유추하지 않는다.
+ *
+ * - Stream    : 스트림 상대 시간 (영상 파일 PTS). monotonic과 비교 불가
+ * - Monotonic : CLOCK_MONOTONIC. steady_clock과 같은 축 → Frame Age 계산 가능
+ * - Realtime  : CLOCK_REALTIME (벽시계). 일부 드라이버/ROS 헤더 stamp가 이 축
+ */
+enum class CaptureTimestampClock {
+    Stream,
+    Monotonic,
+    Realtime
+};
+
+inline std::string toString(CaptureTimestampClock clock) {
+    switch (clock) {
+        case CaptureTimestampClock::Stream: return "stream";
+        case CaptureTimestampClock::Monotonic: return "monotonic";
+        case CaptureTimestampClock::Realtime: return "realtime";
+    }
+    return "unknown";
+}
+
+/*
  * FrameSource가 반환하는 프레임 하나와 캡처 메타데이터
  *
  * - image              : BGR 프레임
@@ -36,11 +61,13 @@ inline std::string toString(CaptureTimestampSource source) {
  * - captureTimestampNs : 캡처 시각(ns). 단위를 ns로 둔 이유는
  *                        V4L2 timeval(us), steady_clock time_since_epoch(ns),
  *                        ROS2 rclcpp::Time(ns)이 모두 손실 없이 int64 ns로 바뀌기 때문
- * - captureTimestampSource : 위 timestamp의 클럭 도메인
+ * - captureTimestampClock  : 위 timestamp의 클럭 (같은 축인지 판단하는 기준)
+ * - captureTimestampSource : 위 timestamp의 출처
  */
 struct Frame {
     cv::Mat image;
     std::int64_t frameSeq = 0;
     std::int64_t captureTimestampNs = 0;
+    CaptureTimestampClock captureTimestampClock = CaptureTimestampClock::Stream;
     CaptureTimestampSource captureTimestampSource = CaptureTimestampSource::VideoPts;
 };
