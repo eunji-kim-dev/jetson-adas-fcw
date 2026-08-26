@@ -119,6 +119,7 @@
 - 같은 기준 영상을 다시 실행해서 baseline MD5가 `a0006c4a16dbe3f69c178fbc5c1b6b8e`와 동일한지 확인함
 - 이상 없으면 타깃 분리 작업을 커밋함
 
+
 ## 2026-08-25
 
 ### 1. CMake 타깃 분리 및 perception_demo 추가
@@ -233,7 +234,55 @@
 - 실행할 때 `--backend` 옵션으로 추론 방식을 선택할 수 있도록 변경
 - 영상 입력 부분을 `FrameSource` 인터페이스로 분리
 - 현재 영상 파일 입력은 `VideoFileSource`로 구현
-  - `frame_seq`
-  - `capture_ts`
-  - `capture_ts_source`
+  - `image`
+  - `frameSeq`
+  - `captureTimestampNs`
+  - `captureTimestampSource`
   정보를 프레임과 함께 관리하도록 구성
+
+
+## 2026-08-26
+
+### 1. YOLO 추론 구조 분리
+- `YoloDetector` 안에 직접 들어 있던 OpenCV DNN 추론 코드를 분리
+- 공통 인터페이스인 `InferenceBackend`를 만들고, 현재 방식은 `OpenCVDNNBackend`로 구현
+- backend는 이미지 한 장을 받아 전처리 → 추론 → 후처리까지 수행한 뒤 `Detection` 결과를 반환
+- 상위 코드는 OpenCV DNN이나 입력·출력 텐서 구조를 몰라도 되도록 구성
+- backend 생성은 factory 함수로 통일
+- 실행할 때 `--backend opencv_dnn` 옵션으로 backend를 선택할 수 있도록 추가
+- Full + Crop 이중 추론 정책은 `YoloDetector`에 유지
+- 중복되어 있던 NMS 코드를 하나로 정리
+- 추론 시간을 전처리 / 추론 / 후처리로 나누어 `InferenceTiming`으로 받을 수 있도록 추가
+- 기존 `[PERF]` 출력과 프로그램 동작은 그대로 유지
+- 리팩터링 전후 결과가 동일한지 확인
+
+### 이 작업을 한 이유
+- 9월에 TensorRT를 붙일 때 기존 코드를 다시 뜯어고치지 않고 `TensorRTBackend`만 추가하기 위해
+- OpenCV DNN과 TensorRT의 입력·출력 방식 차이를 backend 내부에서 처리하기 위해
+- Logging Schema에서 전처리 / 추론 / 후처리 시간을 각각 기록하기 위해
+
+
+### 2. 영상 입력 구조 분리
+- `main.cpp`에서 직접 사용하던 `cv::VideoCapture`를 `VideoFileSource`로 분리
+- 공통 인터페이스인 `FrameSource`를 만들고, `read()`가 `Frame`을 반환하도록 구성
+- `Frame`에는 다음 정보를 저장
+  - `image`: 실제 영상 프레임
+  - `frameSeq`: 프레임 순번
+  - `captureTimestampNs`: 프레임의 시간 정보
+  - `captureTimestampSource`: 시간 정보의 출처
+- 영상 파일에서는 `captureTimestampSource`를 `video_pts`로 사용
+- 시간 단위는 이후 V4L2 카메라와 ROS2에서도 그대로 사용할 수 있도록 ns로 통일
+- 영상 크기와 FPS 정보도 `FrameSource`를 통해 가져오도록 변경
+- 기존 처리 루프는 거의 변경하지 않고 영상 입력 부분만 교체
+- 리팩터링 전후 실행 결과가 동일한지 확인
+
+### 이 작업을 한 이유
+- 9월에 실제 카메라를 연결할 때 `VideoFileSource` 대신 `CameraSource`만 연결할 수 있도록 하기 위해
+- 영상 파일과 실제 카메라가 같은 `Frame` 구조를 사용하도록 만들기 위해
+- `capture_ts`와 이후 만들 `decision_ts`를 이용해 Frame Age를 계산하기 위해
+- 8월 PC Baseline과 9월 Jetson 결과를 같은 로그 형식으로 분석하기 위해
+
+
+### 알게 된 점
+- 기존 `[PERF]`의 Post는 전체 후처리 시간이 아니라 일부 후처리 시간만 측정하고 있었음. 이번에 분리하면서 전처리 / 추론 / 후처리 시간을 따로 볼 수 있게 됨
+- CMake에서 의존성을 `PRIVATE`로 설정해도 공개 헤더에 `cv::dnn::Net`, `cv::VideoCapture` 같은 타입이 들어 있으면 외부 코드에서도 그 기능을 알아야 함. 구현에만 필요한 타입은 헤더 밖으로 숨겨야 함
