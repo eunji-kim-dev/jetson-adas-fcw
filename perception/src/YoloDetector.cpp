@@ -1,79 +1,16 @@
 #include "perception/YoloDetector.hpp"
 
+#include "GroupedNms.hpp"
 #include "perception/Classes.hpp"
 
-#include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <map>
-#include <stdexcept>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
-
-struct LetterboxResult {
-    cv::Mat image;
-    float scale;
-    int padX;
-    int padY;
-};
-
-LetterboxResult letterbox(const cv::Mat& frame, int inputSize) {
-    const float scale = std::min(static_cast<float>(inputSize) / static_cast<float>(frame.cols), static_cast<float>(inputSize) / static_cast<float>(frame.rows));
-    const int resizedWidth = static_cast<int>(std::round(static_cast<float>(frame.cols) * scale));
-    const int resizedHeight = static_cast<int>(std::round(static_cast<float>(frame.rows) * scale));
-
-    cv::Mat resized;
-    cv::resize(frame, resized, cv::Size(resizedWidth, resizedHeight));
-
-    const int totalPadX = inputSize - resizedWidth;
-    const int totalPadY = inputSize - resizedHeight;
-    const int padLeft = totalPadX / 2;
-    const int padRight = totalPadX - padLeft;
-    const int padTop = totalPadY / 2;
-    const int padBottom = totalPadY - padTop;
-
-    cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, padTop, padBottom, padLeft, padRight, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
-
-    return {padded, scale, padLeft, padTop};
-}
-
-/*
- * 전체 프레임 YOLO 결과와 원거리 crop YOLO 결과를 합치면
- * 같은 차량이 두 번 검출될 수 있음
- *
- * 그래서 합친 Detection 전체를
- * car/bus/truck, bicycle/motorcycle, person 그룹으로 다시 묶고
- * IoU 기반 NMS를 한 번 더 수행
- */
-std::vector<Detection> applyGroupedNms(const std::vector<Detection>& input, float nmsThreshold) {
-    std::map<int, std::vector<int>> indicesByGroup;
-    for (int index = 0; index < static_cast<int>(input.size()); ++index) {
-        indicesByGroup[getNmsGroup(input[index].classId)].push_back(index);
-    }
-
-    std::vector<Detection> result;
-    for (const auto& groupEntry : indicesByGroup) {
-        const std::vector<int>& globalIndices = groupEntry.second;
-        std::vector<cv::Rect> groupBoxes;
-        std::vector<float> groupScores;
-
-        for (const int globalIndex : globalIndices) {
-            groupBoxes.push_back(input[globalIndex].box);
-            groupScores.push_back(input[globalIndex].confidence);
-        }
-
-        std::vector<int> keptIndices;
-        cv::dnn::NMSBoxes(groupBoxes, groupScores, 0.0F, nmsThreshold, keptIndices);
-
-        for (const int localIndex : keptIndices) {
-            result.push_back(input[globalIndices[localIndex]]);
-        }
-    }
-    return result;
-}
 
 /*
  * 두 박스 중 더 작은 박스가
@@ -181,24 +118,20 @@ std::vector<Detection> suppressContainedDuplicates(const std::vector<Detection>&
 
 } // namespace
 
-YoloDetector::YoloDetector(const std::string& modelPath, float confidenceThreshold, float nmsThreshold)
-    : confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
-    net_ = cv::dnn::readNetFromONNX(modelPath);
-    net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-    net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-}
+YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold)
+    : backend_(std::move(backend)), nmsThreshold_(nmsThreshold) {}
 
 std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTiming* timing) {
     // 기본 YOLO 검출
     // 전체 블랙박스 프레임에서 먼저 객체를 검출
     const auto fullYoloStart = std::chrono::steady_clock::now();
-    std::vector<Detection> detections = runInference(frame);
+    std::vector<Detection> detections = backend_->infer(frame, timing != nullptr ? &timing->fullInference : nullptr);
     const auto fullYoloEnd = std::chrono::steady_clock::now();
 
     // 전체 프레임에서는 너무 작아진 원거리 차량을
     // 중앙 도로 crop 영역에서 한 번 더 확대 추론
     const auto farYoloStart = std::chrono::steady_clock::now();
-    const std::vector<Detection> farDetections = detectFarRoadObjects(frame);
+    const std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr);
     const auto farYoloEnd = std::chrono::steady_clock::now();
 
     const auto postprocessStart = std::chrono::steady_clock::now();
@@ -206,7 +139,7 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
     detections.insert(detections.end(), farDetections.begin(), farDetections.end());
     // 두 추론에서 같은 차량이 각각 검출될 수 있으므로
     // 합쳐진 결과에 클래스 그룹별 NMS를 다시 적용
-    detections = applyGroupedNms(detections, nmsThreshold_);
+    detections = applyGroupedNms(detections, 0.0F, nmsThreshold_);
     // IoU NMS로 제거되지 않는 부분 포함형/납작한 큰 박스를
     // containment + 중심 포함 + 종횡비 조건으로 한 번 더 제거
     detections = suppressContainedDuplicates(detections);
@@ -226,89 +159,6 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
 
     return detections;
 }
-std::vector<Detection> YoloDetector::runInference(const cv::Mat& frame) {
-    constexpr int inputSize = 640;
-    const LetterboxResult prepared = letterbox(frame, inputSize);
-
-    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, cv::Size(inputSize, inputSize), cv::Scalar(), true, false);
-    net_.setInput(blob);
-    cv::Mat output = net_.forward();
-
-    if (output.dims != 3) throw std::runtime_error("지원하지 않는 YOLO 출력 차원");
-
-    const int firstDimension = output.size[1];
-    const int secondDimension = output.size[2];
-    cv::Mat predictions(firstDimension, secondDimension, CV_32F, output.ptr<float>());
-    
-    if (firstDimension < secondDimension) predictions = predictions.t();
-
-    std::vector<cv::Rect> boxes;
-    std::vector<float> confidences;
-    std::vector<int> classIds;
-
-    for (int row = 0; row < predictions.rows; ++row) {
-        const float* data = predictions.ptr<float>(row);
-        const float centerX = data[0], centerY = data[1], boxWidth = data[2], boxHeight = data[3];
-
-        cv::Mat classScores(1, predictions.cols - 4, CV_32F, const_cast<float*>(data + 4));
-        cv::Point bestClassPoint;
-        double bestClassScore = 0.0;
-        cv::minMaxLoc(classScores, nullptr, &bestClassScore, nullptr, &bestClassPoint);
-
-        const int rawClassId = bestClassPoint.x;
-        const float rawConfidence = static_cast<float>(bestClassScore);
-
-        if (rawConfidence < confidenceThreshold_) continue;
-
-        int left = static_cast<int>(std::round((centerX - boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale));
-        int top = static_cast<int>(std::round((centerY - boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale));
-        int right = static_cast<int>(std::round((centerX + boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale));
-        int bottom = static_cast<int>(std::round((centerY + boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale));
-
-        left = std::clamp(left, 0, frame.cols - 1);
-        top = std::clamp(top, 0, frame.rows - 1);
-        right = std::clamp(right, 0, frame.cols - 1);
-        bottom = std::clamp(bottom, 0, frame.rows - 1);
-
-        if (right <= left || bottom <= top) continue;
-
-        const int restoredWidth = right - left;
-        const int restoredHeight = bottom - top;
-
-        if (!isTargetClass(rawClassId)) continue;
-
-        boxes.emplace_back(left, top, restoredWidth, restoredHeight);
-        confidences.push_back(rawConfidence);
-        classIds.push_back(rawClassId);
-    }
-
-    std::map<int, std::vector<int>> indicesByGroup;
-    for (int index = 0; index < static_cast<int>(classIds.size()); ++index) {
-        indicesByGroup[getNmsGroup(classIds[index])].push_back(index);
-    }
-
-    std::vector<Detection> detections;
-    for (const auto& groupEntry : indicesByGroup) {
-        const std::vector<int>& globalIndices = groupEntry.second;
-        std::vector<cv::Rect> groupBoxes;
-        std::vector<float> groupConfidences;
-
-        for (const int globalIndex : globalIndices) {
-            groupBoxes.push_back(boxes[globalIndex]);
-            groupConfidences.push_back(confidences[globalIndex]);
-        }
-
-        std::vector<int> keptIndices;
-        cv::dnn::NMSBoxes(groupBoxes, groupConfidences, confidenceThreshold_, nmsThreshold_, keptIndices);
-
-        for (const int localIndex : keptIndices) {
-            const int globalIndex = globalIndices[localIndex];
-            detections.push_back({classIds[globalIndex], confidences[globalIndex], boxes[globalIndex]});
-        }
-    }
-
-    return detections;
-}
 
 /*
  * 동영상 13초 원거리 차량 미검출 오류 수정
@@ -321,7 +171,7 @@ std::vector<Detection> YoloDetector::runInference(const cv::Mat& frame) {
  *
  * crop에서 나온 좌표는 다시 원본 프레임 좌표로 복원
  */
-std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame) {
+std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing) {
     const int cropX = static_cast<int>(std::round(frame.cols * 0.25F));
     const int cropY = static_cast<int>(std::round(frame.rows * 0.38F));
     const int cropWidth = static_cast<int>(std::round(frame.cols * 0.50F));
@@ -337,7 +187,7 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame) 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
     const cv::Mat crop = frame(cropRect).clone();
 
-    std::vector<Detection> cropDetections = runInference(crop);
+    std::vector<Detection> cropDetections = backend_->infer(crop, timing);
     std::vector<Detection> result;
 
     for (Detection detection : cropDetections) {

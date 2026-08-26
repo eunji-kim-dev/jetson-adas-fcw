@@ -18,13 +18,16 @@
  */
 #include "perception/Classes.hpp"
 #include "perception/Detection.hpp"
+#include "perception/InferenceBackend.hpp"
 #include "perception/MultiObjectTracker.hpp"
 #include "perception/YoloDetector.hpp"
 #include "adas/LeadSelector.hpp"
 #include "adas/WarningPolicy.hpp"
 #include "adas/RiskAnalyzer.hpp"
+#include <opencv2/core.hpp>
 #include <opencv2/freetype.hpp>
-#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -40,6 +43,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 /*
@@ -230,7 +234,28 @@ void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const 
 }
 
 int main(int argc, char* argv[]) {
-    const std::string inputPath = argc >= 2 ? argv[1] : "videos/input.mp4";
+    // 사용법: adas [입력 영상 경로] [--backend opencv_dnn]
+    std::string inputPath = "videos/input.mp4";
+    std::string backendName = "opencv_dnn";
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--backend") {
+            if (i + 1 >= argc) {
+                std::cerr << "[ERROR] --backend 옵션에 값이 없음 (예: --backend opencv_dnn)\n";
+                return 1;
+            }
+            backendName = argv[++i];
+        } else if (argument.rfind("--backend=", 0) == 0) {
+            backendName = argument.substr(std::string("--backend=").size());
+        } else if (argument.rfind("--", 0) == 0) {
+            std::cerr << "[ERROR] 알 수 없는 옵션: " << argument << "\n사용법: adas [입력 영상 경로] [--backend opencv_dnn]\n";
+            return 1;
+        } else {
+            inputPath = argument;
+        }
+    }
+
     const std::string modelPath = "models/yolov8n.onnx";
     const std::string inputStem = std::filesystem::path(inputPath).stem().string();
     const std::string outputPath = "results/" + inputStem + "_output.avi";
@@ -253,14 +278,17 @@ int main(int argc, char* argv[]) {
     constexpr float detectorThreshold = 0.10F;
     constexpr float nmsThreshold = 0.45F;
 
+    // 추론 엔진은 --backend로 선택하고, YoloDetector는 backend 종류를 알지 못함
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
-        detectorPtr = std::make_unique<YoloDetector>(modelPath, detectorThreshold, nmsThreshold);
-    } catch (const cv::Exception& error) {
-        std::cerr << "[ERROR] YOLO 모델 로드 실패\n" << error.what() << '\n';
+        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold);
+        detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold);
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] 추론 backend 생성 실패 (backend=" << backendName << ")\n" << error.what() << '\n';
         return 1;
     }
     YoloDetector& detector = *detectorPtr;
+    std::cout << "[INFO] 추론 backend: " << backendName << '\n';
 
     cv::VideoCapture capture(inputPath);
     if (!capture.isOpened()) {
@@ -604,4 +632,4 @@ int main(int argc, char* argv[]) {
     std::cout << "결과 파일: " << outputPath << '\n';
 
     return 0;
-}
+}
