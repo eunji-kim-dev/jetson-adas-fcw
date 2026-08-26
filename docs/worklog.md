@@ -286,3 +286,134 @@
 ### 알게 된 점
 - 기존 `[PERF]`의 Post는 전체 후처리 시간이 아니라 일부 후처리 시간만 측정하고 있었음. 이번에 분리하면서 전처리 / 추론 / 후처리 시간을 따로 볼 수 있게 됨
 - CMake에서 의존성을 `PRIVATE`로 설정해도 공개 헤더에 `cv::dnn::Net`, `cv::VideoCapture` 같은 타입이 들어 있으면 외부 코드에서도 그 기능을 알아야 함. 구현에만 필요한 타입은 헤더 밖으로 숨겨야 함
+
+
+### 3. 실행 로그 스키마 확정 및 구현
+- 실행 1회를 하나의 Run으로 관리하고 `results/runs/<run_id>/` 아래에 로그 생성
+  - `raw_frame_log.csv`: 프레임별 처리시간과 FCW 상태
+  - `run_summary.json`: 코드 버전, 입력, 모델, 실행 환경 등 Run의 조건
+- 로그 작성 기능은 `logging/`의 `run_logger` 라이브러리로 분리
+  - `adas`, `perception_demo`가 같은 스키마 사용
+  - 두 앱의 공통 실행 옵션은 `apps/common/RunOptions.hpp`로 통합
+- 실행 옵션 추가
+  - `--run-id`
+  - `--power-mode`
+  - `--warmup-frames`
+  - `--measured-frames`
+
+#### 기록하는 값
+- 프레임 식별: `frame`, `frame_seq`
+  - 프로그램이 처리한 순서와 실제 입력 프레임 번호를 비교해서 Frame Drop이 있는지 확인
+- Timestamp: `capture_ts`, `dequeue_ts`, `decision_ts`
+  - `capture_ts`: 프레임이 입력된 시각
+  - `dequeue_ts`: 프로그램이 프레임 처리를 시작한 시각
+  - `decision_ts`: FCW 판단이 끝난 시각
+  - `total_processing_ms = decision_ts - dequeue_ts`
+  - 서로 다른 시간 기준을 잘못 계산하지 않도록 `capture_ts_clock`도 함께 기록
+  - 영상 파일은 `stream` 기준이고, 실제 카메라는 `monotonic` 기준
+  - 영상 파일은 실제 시스템 시간과 비교할 수 없으므로 Frame Age는 `n/a`
+- 단계별 처리시간
+  - Full / Crop 각각
+    - `preprocess`
+    - `inference`
+    - `postprocess`
+  - 추가로
+    - `merge`
+    - `detect`
+    - `tracking`
+    - `decision`
+    - `output`
+  - 단순히 "YOLO가 느리다"가 아니라 실제로 어느 단계가 오래 걸리는지 확인하기 위해 세분화
+- FCW 상태
+  - `detections`
+  - `tracks`
+  - `lead_id`
+  - `lead_found`
+  - `ttc_p`
+  - `risk_state`
+  - `warning_state`
+  - `scene_changed`
+  - LEAD 차량이 얼마나 안정적으로 유지되는지, TTC-P가 얼마나 자주 계산되는지 등을 확인하는 데 사용
+- Run 정보
+  - git commit / dirty 여부
+  - hardware
+  - backend
+  - precision
+  - build type
+  - 입력 영상 / 모델 hash
+  - 입력 영상 FPS (`source_fps`, 측정 FPS는 분석 스크립트가 계산)
+  - confidence / NMS threshold
+  - 파일 이름이 같더라도 실제 내용이 다를 수 있으므로 hash를 함께 기록
+
+#### 분석 스크립트
+- `tools/analyze_runs.py`
+  - `raw_frame_log.csv`와 `run_summary.json`을 읽어서 성능을 자동으로 계산
+  - FPS
+  - p50 / p95 / max 처리시간
+  - Deadline Miss Rate
+  - Frame Age
+  - Frame Drop
+  - LEAD 유지 구간 수
+  - LEAD 유지시간 중앙값
+  - 짧게 끊기는 LEAD 구간 비율
+  - TTC-P 산출률
+  - 여러 Run을 비교할 경우 최소값 / 최대값 / 결과가 얼마나 흔들리는지도 계산
+- `git_dirty: true`인 Run은 기본적으로 분석에서 제외
+- 필요할 때만 `--include-dirty`를 사용
+```bash
+python3 tools/analyze_runs.py results/runs
+```
+
+#### 검증
+- Logging Schema를 추가한 뒤에도 기존 FCW 결과가 바뀌지 않은 것 확인
+  - 기존 프레임 결과 CSV가 이전과 동일
+  - `perception_demo`가 만든 영상도 이전과 동일
+- 기록된 시간 값이 정상적으로 계산되는 것 확인
+  - 프레임 처리 시작부터 FCW 판단 완료까지의 시간이 올바르게 기록됨
+  - 단계별 처리시간도 정상적으로 기록됨
+- 기존에 기록하던 FCW 정보와 새 로그의 값이 동일한 것 확인
+  - Detection 수
+  - Track 수
+  - LEAD 차량
+  - 위험 상태
+  - 장면 전환 등
+- `--warmup-frames`, `--measured-frames` 옵션이 지정한 프레임 수대로 동작하는 것 확인
+- 커밋하지 않은 코드로 실행하면 `git_dirty: true`,
+  커밋 후 다시 빌드하면 `git_dirty: false`로 기록되는 것 확인
+- `tools/analyze_runs.py`가 생성된 로그를 읽고 FPS, 처리시간, FCW 관련 지표를 정상적으로 계산하는 것 확인
+
+### 알게 된 점
+- 평가기준이 "무엇을 볼 것인가"라면 Logging Schema는 "그 값을 계산하기 위해 무엇을 남길 것인가"
+- 최적화는 FPS만 오르는 게 아니라 FCW 판단 결과를 유지하면서 처리속도가 빨라져야 함
+- p50은 평소 처리시간, p95는 가끔 느려질 때의 처리시간을 보는 값
+- 영상 파일의 `capture_ts`는 영상 자체의 시간이므로 실제 시스템 시간과 비교할 수 없음
+  - 따라서 영상 파일에서 Frame Age가 `n/a`인 것이 정상
+- git 정보는 build할 때 갱신해야 실제 실행한 코드가 어느 commit인지 정확하게 남길 수 있음
+- 성능 측정 순서
+  - 코드 수정
+  - 검증
+  - commit
+  - build
+  - 측정
+- raw 로그에는 실제 측정값을 그대로 남기고, 평균이나 p50 같은 통계값은 분석 스크립트에서 계산하는 것이 관리하기 편함
+- 같은 PC에서 대용량 다운로드가 돌아가면 성능 측정값이 흔들릴 수 있으므로 Baseline 측정할 때는 다른 무거운 작업을 끄는 것이 좋음
+
+### 다음 작업
+- x86 PC에서 현재 코드의 기본 성능(Baseline) 측정
+- 측정할 때 조건을 매번 똑같이 맞춤
+  - 같은 입력 영상
+  - 같은 YOLO 모델
+  - 같은 confidence / NMS threshold
+  - Release 빌드
+  - 같은 warmup / measured 프레임 수
+  - 회차 간 유휴 시간 동일 (CPU 클럭·온도 편차 통제)
+  - 전원 연결 상태 동일, `--power-mode`로 기록
+  - 측정 중 다운로드 등 다른 무거운 작업 중지
+- 같은 조건으로 5번 반복 측정
+  - `baseline_x86_r1`
+  - `baseline_x86_r2`
+  - `baseline_x86_r3`
+  - `baseline_x86_r4`
+  - `baseline_x86_r5`
+- 5번의 결과가 원래 어느 정도씩 흔들리는지 확인
+- 이후 코드를 최적화했을 때 이 범위를 확실히 넘어 성능이 좋아졌는지 비교
