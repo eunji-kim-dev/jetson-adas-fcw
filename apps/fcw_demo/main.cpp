@@ -18,8 +18,11 @@
  */
 #include "perception/Classes.hpp"
 #include "perception/Detection.hpp"
+#include "perception/Frame.hpp"
+#include "perception/FrameSource.hpp"
 #include "perception/InferenceBackend.hpp"
 #include "perception/MultiObjectTracker.hpp"
+#include "perception/VideoFileSource.hpp"
 #include "perception/YoloDetector.hpp"
 #include "adas/LeadSelector.hpp"
 #include "adas/WarningPolicy.hpp"
@@ -290,16 +293,20 @@ int main(int argc, char* argv[]) {
     YoloDetector& detector = *detectorPtr;
     std::cout << "[INFO] 추론 backend: " << backendName << '\n';
 
-    cv::VideoCapture capture(inputPath);
-    if (!capture.isOpened()) {
-        std::cerr << "[ERROR] 영상 열기 실패: " << inputPath << '\n';
+    // 영상 입력은 FrameSource 인터페이스 뒤에 둔다
+    // 실시간 카메라(CameraSource)로 바꿀 때 이 생성부만 교체하면 됨
+    std::unique_ptr<FrameSource> sourcePtr;
+    try {
+        sourcePtr = std::make_unique<VideoFileSource>(inputPath);
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] " << error.what() << '\n';
         return 1;
     }
+    FrameSource& source = *sourcePtr;
 
-    const int width = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_WIDTH));
-    const int height = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
-    double sourceFps = capture.get(cv::CAP_PROP_FPS);
-    if (sourceFps <= 0.0) sourceFps = 30.0;
+    const int width = source.width();
+    const int height = source.height();
+    const double sourceFps = source.fps();
 
     cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
     if (!writer.isOpened()) {
@@ -348,13 +355,15 @@ int main(int argc, char* argv[]) {
     int sceneWarmupRemaining = 0;
 
     SceneChangeDetector sceneChangeDetector;
-    cv::Mat frame;
+    Frame captured;
     int processedFrames = 0;
     double totalInferenceMilliseconds = 0.0, totalFullYoloMilliseconds = 0.0, totalFarYoloMilliseconds = 0.0, totalPostprocessMilliseconds = 0.0;
 
     const auto totalStart = std::chrono::steady_clock::now();
 
-    while (capture.read(frame)) {
+    while (source.read(captured)) {
+        // 이후 코드는 프레임 이미지만 사용하고, frameSeq / captureTimestamp는 아직 쓰지 않음
+        cv::Mat& frame = captured.image;
         ++processedFrames;
 
         // 반드시 ROI, 박스, 글씨를 그리기 전의 원본 프레임으로 장면 전환을 감지
@@ -616,7 +625,6 @@ int main(int argc, char* argv[]) {
     const double averagePostprocessMilliseconds = processedFrames > 0 ? totalPostprocessMilliseconds / static_cast<double>(processedFrames) : 0.0;
     const double inferenceFps = averageInferenceMilliseconds > 0.0 ? 1000.0 / averageInferenceMilliseconds : 0.0;
 
-    capture.release();
     writer.release();
     csvFile.close();
 

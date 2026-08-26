@@ -12,8 +12,11 @@
  */
 #include "perception/Classes.hpp"
 #include "perception/Detection.hpp"
+#include "perception/Frame.hpp"
+#include "perception/FrameSource.hpp"
 #include "perception/InferenceBackend.hpp"
 #include "perception/MultiObjectTracker.hpp"
+#include "perception/VideoFileSource.hpp"
 #include "perception/YoloDetector.hpp"
 
 #include <opencv2/imgproc.hpp>
@@ -73,16 +76,20 @@ int main(int argc, char* argv[]) {
     YoloDetector& detector = *detectorPtr;
     std::cout << "[INFO] 추론 backend: " << backendName << '\n';
 
-    cv::VideoCapture capture(inputPath);
-    if (!capture.isOpened()) {
-        std::cerr << "[ERROR] 영상 열기 실패: " << inputPath << '\n';
+    // 영상 입력은 FrameSource 인터페이스 뒤에 둔다
+    // 실시간 카메라(CameraSource)로 바꿀 때 이 생성부만 교체하면 됨
+    std::unique_ptr<FrameSource> sourcePtr;
+    try {
+        sourcePtr = std::make_unique<VideoFileSource>(inputPath);
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] " << error.what() << '\n';
         return 1;
     }
+    FrameSource& source = *sourcePtr;
 
-    const int width = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_WIDTH));
-    const int height = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
-    double sourceFps = capture.get(cv::CAP_PROP_FPS);
-    if (sourceFps <= 0.0) sourceFps = 30.0;
+    const int width = source.width();
+    const int height = source.height();
+    const double sourceFps = source.fps();
 
     cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
     if (!writer.isOpened()) {
@@ -91,10 +98,11 @@ int main(int argc, char* argv[]) {
     }
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
-    cv::Mat frame;
+    Frame captured;
     int processedFrames = 0;
 
-    while (capture.read(frame)) {
+    while (source.read(captured)) {
+        cv::Mat& frame = captured.image;
         ++processedFrames;
 
         std::vector<Detection> detections;
@@ -120,7 +128,6 @@ int main(int argc, char* argv[]) {
         writer.write(frame);
     }
 
-    capture.release();
     writer.release();
 
     std::cout << "[SUCCESS] perception 단독 실행 완료: " << processedFrames << " 프레임 처리\n";
