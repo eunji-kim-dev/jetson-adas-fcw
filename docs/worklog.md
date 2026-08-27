@@ -417,3 +417,308 @@ python3 tools/analyze_runs.py results/runs
   - `baseline_x86_r5`
 - 5번의 결과가 원래 어느 정도씩 흔들리는지 확인
 - 이후 코드를 최적화했을 때 이 범위를 확실히 넘어 성능이 좋아졌는지 비교
+
+
+## 2026-08-27
+
+### 1. x86 Baseline 측정 조건 확정
+- 새 Logging Schema 기준으로 현재 x86 CPU 성능을 다시 측정
+- 이 값은 이후 CPU 최적화와 Jetson 이식 결과를 비교할 Baseline으로 사용
+
+#### 측정 조건
+- 입력 영상: `videos/input.mp4`
+  - 1,252프레임
+  - 1280×720
+  - 29.970 fps
+  - hash `fe5e0610a5c0e53f`
+- 모델: `models/yolov8n.onnx`
+  - opset 12
+  - 640×640
+  - hash `9c5dac75fdcfb621`
+- backend: `opencv_dnn`
+- precision: `fp32`
+- confidence: 0.10
+  - 원거리 Crop 보조 추론만 0.20
+- NMS: 0.45
+- Build: Release
+- warmup: 15프레임
+- measured: 1,237프레임
+- 반복: 5회
+- Run 사이 유휴: 15분
+- power mode: `ac_balanced`
+
+#### 실행 환경
+- Intel Core i7-1165G7
+- 4 Core / 8 Thread
+- RAM 7.6 GB
+- WSL2
+- OpenCV 4.10.0
+- GNU g++ 15.2.0
+- 전원 연결
+- Windows 전원 모드: 균형 잡힌
+- 화면 끄기 / 절전: 안 함
+
+환경 정보는 `results/baseline_x86_env.txt`에 따로 기록
+
+### 2. Baseline용 Release Build 확인
+- 기존 `build/`를 지우고 Release로 처음부터 다시 빌드
+- 실행 파일:
+  - `build/apps/adas`
+- 빌드 후 `BuildInfo.hpp` 확인 결과:
+  - git commit: `294f26681f222c00c52c760d117290b761900f6a`
+  - git dirty: `0`
+  - build type: `Release`
+  - compiler: `GNU 15.2.0`
+- 측정 직전 working tree가 clean인 것도 확인
+
+### 3. warmup 15프레임으로 확정
+- 첫 LEAD 차량이 17번 프레임부터 시작
+- warmup을 15프레임으로 잡으면 초기 실행 구간을 제외하면서 LEAD와 TTC-P 구간은 자르지 않을 수 있음
+  - warmup: 15프레임
+  - measured: 1,237프레임
+  - 전체: 1,252프레임
+- 프레임 구성
+  - warmup: 15프레임
+  - measured: 1,237프레임
+  - 전체: 1,252프레임
+- `--measured-frames 0`으로 끝까지 처리하지 않고 1,237을 직접 지정
+- 측정 프레임 수를 `run_summary.json`에 조건으로 남겨 이후 다른 측정과 조건을 비교
+
+### 4. Baseline 전 검증
+- 본 측정 전에 `verify_x86_pre_baseline` Run을 실행
+- 확인한 항목:
+  - 전체 1,252프레임 정상 기록
+  - warmup 15 + measured 1,237
+  - `frame`, `frame_seq` 연속
+  - Frame Drop 없음
+  - timestamp 역행 없음
+  - 처리시간 음수 없음
+  - `total_processing_ms = decision_ts - dequeue_ts` 일치
+  - Deadline Miss 판정 일치
+- `results/golden_baseline.csv`와도 프레임 단위로 비교
+  - Detection 수
+  - Track 수
+  - LEAD ID
+  - Scene Change
+  - Risk State
+  - TTC-P
+- 전부 불일치 0행
+- Logging 추가 이후에도 기존 FCW 결과가 그대로 유지되는 것을 확인
+
+### 5. FCW 기준값 확인
+- `analyze_runs.py`의 실제 계산 기준을 다시 확인
+- 현재 FCW 기준값:
+  ```text
+  LEAD Segment         6
+  Segment Median       0.851 s
+  Short Segment Ratio  0.750
+  TTC-P Valid Rate     0.380
+  Frame Drop           0
+  ```
+- 실제 LEAD 구간:
+  ```text
+  1: 306 frames = 10.210 s, scene cut
+  2: 236 frames = 7.875 s, scene cut
+  3:  42 frames = 1.401 s
+  4:   8 frames = 0.267 s
+  5:   1 frame  = 0.033 s
+  6:   9 frames = 0.300 s
+  ```
+- 6개 구간의 중앙값은 약 `0.851 s`
+- Short Segment Ratio는 Scene Change 때문에 끝난 앞의 두 구간을 제외하고 계산
+- 남은 4개 구간 중 0.5초보다 짧은 구간이 3개
+  ```text
+  3 / 4 = 0.750
+  ```
+
+### 6. x86 Baseline 5회 측정
+- 동일한 조건으로 5회 반복 측정
+| Run | FPS | proc p50 | proc p95 | detect p50 | detect p95 |
+|---|--:|--:|--:|--:|--:|
+| r1 | 3.881 | 231.2 ms | 360.0 ms | 228.3 ms | 356.8 ms |
+| r2 | 3.802 | 235.1 ms | 374.6 ms | 232.0 ms | 370.6 ms |
+| r3 | 3.014 | 262.1 ms | 598.8 ms | 258.9 ms | 593.9 ms |
+| r4 | 3.345 | 249.1 ms | 462.9 ms | 246.4 ms | 459.0 ms |
+| r5 | 3.475 | 240.6 ms | 420.5 ms | 237.7 ms | 416.3 ms |
+
+#### 회차 간 변동
+- FPS: 3.014 ~ 3.881 → 24.9%
+- Processing p50: 231.2 ~ 262.1 ms → 12.9%
+- Processing p95: 360.0 ~ 598.8 ms → 56.8%
+- Detect p50: 228.3 ~ 258.9 ms → 약 12.9%
+- Deadline Miss Rate: 100%, 5회 동일
+- 5회 전체 measured frame은 총 6,185프레임
+- 전체 Processing Latency
+  ```text
+  p50  240.3 ms
+  p95  463.9 ms
+  p99  618.2 ms
+  max  942.3 ms
+  ```
+- FCW 관련 결과는 5회 모두 동일
+
+### 7. 현재 병목 확인
+- 대표값 기준
+  ```text
+  Processing p50 ≈ 240.6 ms
+  Detect p50     ≈ 237.7 ms
+  ```
+- Processing 시간의 약 98.8%가 Detect 단계
+- 5회 중앙값 기준 추론 시간
+  ```text
+  Full inference p50 ≈ 102.9 ms
+  Crop inference p50 ≈ 103.5 ms
+  ```
+- 두 추론을 합치면 약 206 ms
+- 현재 CPU 병목은 Full-frame YOLO + Crop YOLO의 두 번 추론
+
+### 8. Run 내부 처리시간 변화 확인
+- 각 Run을 10등분해서 Processing p50을 확인
+| Run | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| r1 | 175 | 187 | 192 | 242 | 242 | 246 | 243 | 243 | 243 | 240 |
+| r2 | 181 | 189 | 194 | 249 | 248 | 245 | 257 | 257 | 249 | 247 |
+| r3 | 174 | 192 | 195 | 433 | 546 | 473 | 273 | 243 | 247 | 250 |
+| r4 | 178 | 193 | 198 | 244 | 379 | 379 | 393 | 246 | 247 | 248 |
+| r5 | 380 | 216 | 247 | 237 | 230 | 232 | 231 | 232 | 245 | 246 |
+- r1~r4
+  - 앞 3구간에서 약 174~198 ms
+  - 4구간부터 240 ms대로 변경
+  - 비슷한 위치에서 변화가 나타나 지속 부하에 따른 CPU 클럭·전력 상태 영향으로 보임
+  - 정확한 원인은 CPU Clock / Power 정보를 따로 기록해야 확인 가능
+- r3
+  - 4~7구간에서 크게 느려짐
+  - 8구간부터 다시 원래 범위로 돌아옴
+- r4
+  - 5~7구간에서 느려짐
+  - 8구간부터 다시 원래 범위로 돌아옴
+- WSL2에서 실행 중이므로 Windows 백그라운드 작업 등 외부 CPU 간섭 가능성도 있음
+- r5
+  - 다른 Run과 패턴이 달랐음
+  - 원인은 현재 로그만으로 확정하지 않음
+
+### 9. x86 CPU 성능 Gate 확정
+- 전체 Run의 p50에는 실행 초반의 빠른 구간과 지속 부하 구간이 같이 들어 있음
+- 구간별 결과를 확인했을 때 5회 모두 비교하기 좋은 구간은 **9~10구간, 뒤 20%**
+- 뒤 20% Processing p50
+  ```text
+  r1 241.4 ms
+  r2 247.9 ms
+  r3 249.9 ms
+  r4 247.9 ms
+  r5 243.9 ms
+  ```
+- Baseline 범위
+  ```text
+  241.4 ~ 249.9 ms
+  ```
+- 중앙값
+  ```text
+  247.9 ms
+  ```
+- 변동폭
+  ```text
+  약 3.4%
+  ```
+- 전체 Processing p50의 변동폭 12.9%보다 작음
+- 따라서 x86 CPU 최적화의 주 성능 Gate는 **뒤 20% Processing p50**으로 확정
+
+### 10. CPU 최적화 개선 판정 기준
+- 현재 commit `294f2668`의 지속 구간 성능
+  ```text
+  Processing p50
+  241.4 ~ 249.9 ms
+  중앙값
+  247.9 ms
+  ```
+- CPU Algorithm Optimization 이후에도 동일한 조건으로 5회 측정
+- 개선으로 인정하는 조건:
+  ```text
+  최적화 5회 모두
+  뒤 20% Processing p50 < 241.4 ms
+  ```
+- 최적화 결과의 가장 느린 Run도 Baseline의 가장 빠른 Run보다 빨라야 함
+- 실제 목표값은
+  ```text
+  240 ms 이하
+  ```
+- Baseline 중앙값 247.9 ms 대비 약 3.2% 단축
+- 전체 Run p50, FPS, p95도 기록하지만 주 Gate로 사용하지 않음
+- FCW 기준값은 Baseline과 동일하게 유지해야 함
+  ```text
+  LEAD Segment         6
+  Segment Median       0.851 s
+  Short Segment Ratio  0.750
+  TTC-P Valid Rate     0.380
+  Frame Drop           0
+  ```
+
+### 11. 뒤 20% Gate의 한계
+- 현재 실행에서는 앞쪽 약 3구간에서 빠른 처리시간이 나타남
+- 현재 속도에서는 약 370프레임 정도가 이 구간에 들어감
+- 하지만 코드가 빨라지면 같은 시간 동안 더 많은 프레임을 처리하게 됨
+- 최적화 폭이 커져 현재 영상의 뒤 20%까지 빠른 초기 상태 안에 들어가면 더 이상 지금 Gate를 그대로 사용할 수 없음
+- 그 경우에는 입력 영상을 반복 재생하거나 더 긴 영상을 사용해서 지속 성능 구간을 다시 확보
+- 현재 성능에서는 뒤 20%를 그대로 사용
+
+### 12. Deadline 기준 확인
+- 현재 Logging의 `deadline_ms`는 입력 영상 29.970 fps를 기준
+  - 약 33.4 ms
+- 현재 Baseline에서는 Deadline Miss Rate
+  - 100%
+- 프로젝트의 실시간 목표
+  - 15 FPS
+  - 66.7 ms/frame
+- 현재 Logging Deadline과 프로젝트 목표 Deadline의 기준이 다르므로 이후 하나의 기준으로 맞춤
+
+### 13. 결과 파일
+- `results/baseline_x86_summary.csv`
+  - Baseline 5회 성능 결과
+- `results/baseline_x86_env.txt`
+  - 측정 환경 기록
+- `results/runs/`
+  - 각 Run의 원본 프레임 로그
+
+### 알게 된 점
+- r1~r4는 앞 3구간에서 174~198 ms 정도였다가 4구간부터 240 ms대로 거의 같은 위치에서 바뀌었다.
+- 전체 Processing p50 변동폭은 12.9%였지만 뒤 20%에서는 241.4~249.9 ms, 변동폭 3.4%로 줄었다.
+- r3의 큰 지연은 4~7구간, r4는 5~7구간에 몰렸고 둘 다 8구간부터 원래 범위로 돌아왔다.
+- r5는 초반 처리시간이 크게 느렸지만 9~10구간에서는 다른 Run과 같은 범위로 합류했다.
+- Processing 시간의 약 98.8%가 Detect 단계에 있고, Full/Crop 추론 p50을 합치면 약 206 ms였다.
+- x86 CPU 성능 Gate는 뒤 20% Processing p50으로 확정했다.
+- Gate 기준은 `241.4 ms 미만`, 실제 목표값은 `240 ms 이하`로 정했다.
+- LEAD Segment Median은 0.851 s, Short Segment Ratio는 0.750이 현재 분석 코드의 실제 계산값이다.
+- Logging 추가 전 Golden 결과와 Detection / Track / LEAD / Risk / Scene Change / TTC-P가 모두 동일했다.
+- 현재 Deadline은 33.4 ms 기준이지만 프로젝트 목표는 66.7 ms라 기준을 맞출 필요가 있다.
+- 최적화 폭이 커져 현재 영상의 뒤 20%까지 초기 빠른 구간에 들어가면 더 긴 입력을 사용해야 한다.
+
+### 다음 작업
+- x86 Baseline 결과 정리 마무리
+  - `results/baseline_x86_summary.csv`
+  - `results/baseline_x86_env.txt`
+  - `docs/worklog.md` 반영
+- 실제 Baseline 측정에 사용한 commit `294f2668`에 `baseline-x86` 태그 생성
+- Jetson ARM 빌드 전 현재 코드 의존성 확인
+  - OpenCV
+  - OpenCV contrib / freetype
+  - CMake
+  - ONNX 모델
+  - Jetson 기본 포함 항목과 추가 설치 필요 항목 구분
+- OpenCV `freetype`가 없어도 빌드되도록 처리
+  - 한글 출력 기능을 선택 기능으로 분리
+  - freetype이 없어도 측정용 실행 파일을 빌드할 수 있게 구성
+- Jetson 환경 진단 스크립트 초안 작성
+  - Jetson 모델
+  - RAM
+  - JetPack 버전
+  - CUDA 버전
+  - TensorRT 버전
+  - 현재 전력 모드
+  - `jetson_clocks` 사용 가능 여부
+  - sudo 가능 여부
+  - 외부 네트워크 가능 여부
+  - OpenCV 버전
+  - OpenCV contrib / freetype 포함 여부
+  - `/dev/video*` 목록
+  - 카메라 지원 Format / Resolution / FPS
+- 진단 결과를 파일로 저장하도록 구성
