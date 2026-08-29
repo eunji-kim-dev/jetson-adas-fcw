@@ -50,6 +50,16 @@ std::string formatDouble(double value, int precision) {
     return stream.str();
 }
 
+std::string jsonNumberOrNull(const std::optional<double>& value, int precision) {
+    if (!value.has_value()) return "null";
+    return formatDouble(*value, precision);
+}
+
+std::string jsonBoolOrNull(const std::optional<bool>& value) {
+    if (!value.has_value()) return "null";
+    return *value ? "true" : "false";
+}
+
 std::string nowUtcIso8601() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc{};
@@ -156,6 +166,9 @@ void RunLogger::writeSummary() {
          << "  \"power_mode\": " << jsonString(m.powerMode) << ",\n"
          << "  \"backend\": " << jsonString(m.backend) << ",\n"
          << "  \"precision\": " << jsonString(m.precision) << ",\n"
+         << "  \"temperature_start_c\": " << jsonNumberOrNull(m.temperatureStartC, 1) << ",\n"
+         << "  \"temperature_end_c\": " << jsonNumberOrNull(temperatureEndC_, 1) << ",\n"
+         << "  \"jetson_clocks\": " << jsonBoolOrNull(m.jetsonClocks) << ",\n"
          << "\n"
          << "  \"input_source\": " << jsonString(m.inputSource) << ",\n"
          << "  \"input_name\": " << jsonString(m.inputName) << ",\n"

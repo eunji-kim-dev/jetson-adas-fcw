@@ -20,7 +20,7 @@
 #include "perception/YoloDetector.hpp"
 #include "logging/RunLogger.hpp"
 #include "RunOptions.hpp"
-
+#include "JetsonEnv.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
@@ -90,6 +90,8 @@ int main(int argc, char* argv[]) {
     runMetadata.powerMode = options.powerMode;
     runMetadata.backend = backendName;
     runMetadata.precision = "fp32";
+    runMetadata.temperatureStartC = jetson_env::readSocTemperatureC();
+    runMetadata.jetsonClocks = jetson_env::readJetsonClocksActive();
     runMetadata.opencvVersion = CV_VERSION;
     runMetadata.inputSource = "video_file";
     runMetadata.inputName = inputPath;
@@ -186,6 +188,10 @@ int main(int argc, char* argv[]) {
 
         readStart = std::chrono::steady_clock::now();
     }
+
+    runLogger.setTemperatureEnd(
+        jetson_env::readSocTemperatureC()
+    )
 
     runLogger.finish();
     writer.release();

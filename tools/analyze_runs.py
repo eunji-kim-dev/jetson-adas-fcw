@@ -24,7 +24,7 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMA = 1
+SUPPORTED_SCHEMAS = {1, 2}
 
 
 # ---------- 유틸 ----------
@@ -79,8 +79,13 @@ def find_run_dirs(paths):
 def load_run(run_dir):
     with open(os.path.join(run_dir, "run_summary.json"), encoding="utf-8") as f:
         summary = json.load(f)
-    if summary.get("schema_version") != SUPPORTED_SCHEMA:
-        raise ValueError(f"{run_dir}: schema_version {summary.get('schema_version')} 은 지원하지 않음 (지원: {SUPPORTED_SCHEMA})")
+    schema_version = summary.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMAS:
+        supported = ", ".join(str(v) for v in sorted(SUPPORTED_SCHEMAS))
+        raise ValueError(
+            f"{run_dir}: schema_version {schema_version} 은 지원하지 않음 "
+            f"(지원: {supported})"
+        )
     with open(os.path.join(run_dir, "raw_frame_log.csv"), encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     return summary, rows

@@ -17,6 +17,10 @@ struct RunMetadata {
     std::string powerMode;
     std::string backend;
     std::string precision;
+
+    std::optional<double> temperatureStartC;  // 시작 시 SoC 온도(°C), x86은 값 없음
+    std::optional<bool> jetsonClocks;         // jetson_clocks 적용 여부, x86은 값 없음
+
     std::string opencvVersion;
 
     std::string inputSource;       // "video_file" / "camera"
@@ -91,12 +95,17 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 2;
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();
 
     void writeFrame(const FrameRecord& record);
+
+    void setTemperatureEnd(std::optional<double> celsius) {
+    temperatureEndC_ = celsius;
+    }
+
     void finish();
 
     const std::string& runDirectory() const { return runDirectory_; }
@@ -123,5 +132,6 @@ private:
     std::ofstream frameLog_;
     std::int64_t framesProcessed_;
     double elapsedSeconds_;
+    std::optional<double> temperatureEndC_;
     bool finished_;
 };

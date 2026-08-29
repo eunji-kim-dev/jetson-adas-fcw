@@ -29,6 +29,7 @@
 #include "adas/RiskAnalyzer.hpp"
 #include "logging/RunLogger.hpp"
 #include "RunOptions.hpp"
+#include "JetsonEnv.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/freetype.hpp>
 #include <opencv2/imgproc.hpp>
@@ -345,6 +346,8 @@ int main(int argc, char* argv[]) {
     runMetadata.powerMode = options.powerMode;
     runMetadata.backend = backendName;
     runMetadata.precision = "fp32";
+    runMetadata.temperatureStartC = jetson_env::readSocTemperatureC();
+    runMetadata.jetsonClocks = jetson_env::readJetsonClocksActive();
     runMetadata.opencvVersion = CV_VERSION;
     runMetadata.inputSource = "video_file";
     runMetadata.inputName = inputPath;
@@ -684,6 +687,10 @@ int main(int argc, char* argv[]) {
         readStart = std::chrono::steady_clock::now();
     }
 
+    runLogger.setTemperatureEnd(
+        jetson_env::readSocTemperatureC()
+    );
+
     runLogger.finish();
 
     const auto totalEnd = std::chrono::steady_clock::now();
@@ -711,4 +718,4 @@ int main(int argc, char* argv[]) {
     std::cout << "실행 로그: " << runLogger.runDirectory() << '\n';
 
     return 0;
-}
+}
