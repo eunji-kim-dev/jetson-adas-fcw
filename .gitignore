@@ -24,3 +24,7 @@ results/runs/
 
 # YOLO 원본 모델
 *.pt
+
+# Jetson 진단 로그
+results/diagnostics/
+build_noft/
