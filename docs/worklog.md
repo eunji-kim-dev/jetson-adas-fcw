@@ -724,3 +724,149 @@ python3 tools/analyze_runs.py results/runs
   - `/dev/video*` 목록
   - 카메라 지원 Format / Resolution / FPS
 - 진단 결과를 파일로 저장하도록 구성
+
+## 2026-08-29
+
+### 1. Jetson 실행 환경 정보 로그 추가
+- `run_summary.json`에 Jetson 실행 환경을 기록할 필드 추가
+  - `temperature_start_c`: 실행 시작 시 SoC 온도
+  - `temperature_end_c`: 실행 종료 시 SoC 온도
+  - `jetson_clocks`: `jetson_clocks` 적용 여부
+- 기존 `power_mode` 필드는 그대로 유지
+  - 기존 baseline Run에서 이미 사용하고 있는 필드이므로 새 필드로 만들지 않음
+- `run_summary.json` 구조가 변경되어 `schema_version`을 1에서 2로 변경
+- 기존 schema version 1 로그도 계속 분석할 수 있도록 `tools/analyze_runs.py`에서 version 1과 2를 모두 지원하도록 수정
+- `apps/common/JetsonEnv.hpp` 추가
+  - Jetson 실행 환경 값을 읽는 함수를 한 파일에 모음
+  - 현재는 실제 Jetson 센서를 읽지 않고 `std::nullopt`를 반환
+  - x86에서는 Jetson 전용 값이 `null`로 기록되도록 구성
+- `adas`, `perception_demo` 두 앱에 실행 환경 기록 연결
+  - 실행 시작 시 온도와 `jetson_clocks` 상태 기록
+  - 프레임 처리 종료 후 종료 온도 기록
+  - 마지막에 `RunLogger::finish()`가 최종 `run_summary.json` 작성
+
+### 이 작업을 한 이유
+- 9월 Jetson 성능 측정에서 실행마다 온도와 클럭 상태가 달라지는 것을 로그에 같이 남기기 위해
+- 성능 차이가 코드 변경 때문인지 실행 환경 차이 때문인지 나중에 확인할 수 있게 하기 위해
+- 지금은 x86에서 호출 위치와 로그 구조만 먼저 고정하고, 실제 Jetson 센서 읽기는 장비에서 `JetsonEnv.hpp` 내부만 구현할 수 있게 하기 위해
+
+
+### 2. OpenCV freetype 선택 의존성 분리
+- 최상위 CMake에 `ENABLE_FREETYPE` 옵션 추가
+  - 기본값은 `ON`
+  - `ON`: 기존처럼 OpenCV freetype 사용
+  - `OFF`: freetype 없이 빌드
+- OpenCV 필수 모듈과 freetype 의존성을 분리
+  - `core`
+  - `imgproc`
+  - `videoio`
+  - `dnn`
+  - `video`
+  는 항상 사용
+  - `freetype`은 `ENABLE_FREETYPE=ON`일 때만 사용
+- `ENABLE_FREETYPE=ON`일 때만 `ADAS_HAS_FREETYPE`을 정의하도록 변경
+- `<opencv2/freetype.hpp>`도 `ADAS_HAS_FREETYPE`이 있을 때만 include하도록 변경
+- `KoreanTextRenderer`를 freetype 사용 여부에 따라 조건부 컴파일하도록 변경
+  - freetype 사용 시 기존 `cv::freetype::FreeType2` 사용
+  - freetype 미사용 시 OpenCV 기본 Hershey 글꼴로 fallback
+- freetype이 없는 빌드에서도 한글 표시 기능 때문에 프로그램 전체가 종료되지 않도록 변경
+- 빌드 확인 중 `perception_demo/main.cpp`의 누락된 세미콜론 수정
+
+#### 검증
+- `ENABLE_FREETYPE=ON` Release 빌드 성공
+- `ENABLE_FREETYPE=OFF` Release 빌드 성공
+- 두 구성 모두 실행 후 프레임 결과 CSV의 MD5가 기존과 동일
+  * `a0006c4a16dbe3f69c178fbc5c1b6b8e`
+- `run_summary.json`에서 새 필드 3개가 모두 `null`로 기록되는 것 확인
+
+### 이 작업을 한 이유
+- Jetson 기본 OpenCV에 contrib/freetype이 없더라도 측정용 프로그램을 빌드할 수 있게 하기 위해
+- 한글 오버레이 기능 때문에 Jetson 이식 전체가 막히지 않도록 하기 위해
+- PC에서는 기존 한글 출력 기능을 그대로 사용하고, Jetson에서는 필요할 때 freetype만 끌 수 있게 하기 위해
+
+### 알게 된 점
+- 값이 없는 상태를 빈 문자열이나 `-1`로 쓰면 나중에 실제 값과 구분하기 어려움
+  - JSON에서는 `null`을 사용하면 "측정하지 않음" 상태를 명확하게 표현할 수 있음
+- Jetson용 필드를 미리 스키마에 추가해두면 이후 실제 센서 값을 연결할 때 로그 형식을 다시 바꿀 필요가 없음
+  - x86에서는 `null`, Jetson에서는 실제 값을 기록하는 식으로 같은 스키마를 사용할 수 있음
+- CMake 옵션만 끄고 소스 코드를 그대로 두면 해당 라이브러리의 include와 타입 참조 때문에 빌드가 깨질 수 있음
+  - 선택 의존성을 만들 때는 CMake 설정과 조건부 컴파일을 같이 적용해야 함
+
+
+### 3. Jetson 첫 세션 진단 스크립트 추가
+- Jetson 첫 세션에서 설치나 설정 변경 없이 현재 환경만 확인할 수 있도록 `scripts/jetson_diagnose.sh` 추가
+- 스크립트는 항목 하나가 실패해도 나머지 확인을 계속할 수 있도록 `set -e`를 사용하지 않음
+- 진단 결과는 화면에 출력하면서 `results/diagnostics/`에도 파일로 저장
+- `.gitattributes`에 `scripts/*.sh text eol=lf`를 추가해 Jetson에서 CRLF 문제 없이 실행되도록 설정
+- `results/diagnostics/`와 `build_noft/`는 Git 추적 대상에서 제외
+
+#### 확인하는 항목
+- L4T / JetPack 정보
+- CMake 버전
+- g++ 버전 및 C++17 `<filesystem>`, `<optional>` 사용 가능 여부
+- OpenCV 버전 및 필수 모듈
+  - `core`
+  - `imgproc`
+  - `videoio`
+  - `dnn`
+  - `video`
+- OpenCV freetype 라이브러리와 헤더 존재 여부
+- 외부 네트워크 접근 가능 여부
+- 반입한 ONNX 모델과 측정 영상의 MD5
+- `nvpmodel`, `jetson_clocks` 존재 여부와 현재 전력 모드
+- 비밀번호 없는 sudo 사용 가능 여부
+- 프로젝트가 위치한 파일시스템의 남은 공간
+
+#### 모델·영상 무결성 확인
+- x86에서 검증한 기준 MD5를 스크립트에 저장
+  - `models/yolov8n.onnx`
+    - `a933e257dfd691fcd8e0576013a43181`
+  - `videos/input.mp4`
+    - `a09eecf3b4933273915fb6c75e23d221`
+- Jetson에 반입한 파일의 MD5를 자동 계산해 기준값과 `MATCH / MISMATCH`로 비교하도록 구성
+- `run_summary.json`에서 사용하는 FNV-1a 64bit 기준값도 함께 출력
+  - input: `fnv1a64:fe5e0610a5c0e53f`
+  - model: `fnv1a64:9c5dac75fdcfb621`
+
+#### 검증
+- `bash -n scripts/jetson_diagnose.sh` 문법 검사 통과
+- x86에서 스크립트 전체 실행 성공
+- `[1]`부터 `[9]`까지 중간 종료 없이 실행되는 것 확인
+- 진단 결과 파일이 `results/diagnostics/`에 생성되는 것 확인
+- 로그 마지막에 `Diagnose Complete`까지 저장되는 것 확인
+- 모델과 입력 영상 MD5가 모두 기존 기준값과 일치하는 것 확인
+
+### 이 작업을 한 이유
+- Jetson 첫 세션에서 설치부터 시작하지 않고, 현재 장비에 무엇이 기본으로 들어 있는지 먼저 기록하기 위해
+- OpenCV, freetype, 컴파일러, 전력 도구 등 빌드와 성능 측정에 필요한 조건을 한 번에 확인하기 위해
+- 장비 반입 후 사용한 모델과 영상이 x86 baseline에서 검증한 파일과 같은지 바로 확인하기 위해
+- 첫 측정 전에 환경 상태를 파일로 남겨 이후 성능 결과와 같이 비교할 수 있게 하기 위해
+
+### 알게 된 점
+- 환경 진단 스크립트는 일부 항목이 실패하더라도 전체 확인이 계속되는 것이 중요함
+- C++17 지원은 컴파일러 버전만 보는 것보다 실제 프로젝트에서 사용하는 `<filesystem>`, `<optional>`을 직접 컴파일해보는 것이 더 정확함
+- 선택 의존성은 라이브러리 존재 여부만으로 충분하지 않고 헤더와 CMake 설정까지 함께 확인해야 실제 빌드 가능 여부를 판단할 수 있음
+- 반입 파일은 이름만 같아도 내용이 다를 수 있으므로 해시를 기준으로 확인하는 것이 안전함
+- 진단 로그도 실행 결과의 일부이므로 화면 출력만 하지 않고 파일로 남겨야 나중에 실험 조건을 다시 확인할 수 있음
+
+
+### 다음 작업
+- 같은 측정 조건으로 여러 Run을 자동 실행할 수 있도록 Benchmark Harness 구현
+  - 실험 ID 또는 이름을 인자로 받아 실행
+  - Warm-up Frame, Measured Frame, Threshold 등 측정 조건을 스크립트에 고정
+  - ADAS 실행을 정해진 횟수만큼 반복
+  - 각 Run의 로그를 서로 다른 디렉터리에 저장
+  - Run 사이에 일정한 대기시간 적용
+  - 실행 성공 / 실패 여부 기록
+  - 세션 종료 후 생성된 로그를 한곳에 모아 압축
+- Harness 실행 후 FCW 결과 CSV의 MD5를 기존 golden 값과 자동 비교
+  - golden MD5: `a0006c4a16dbe3f69c178fbc5c1b6b8e`
+  - 값이 다르면 해당 Run을 FAIL로 처리
+- 8/31 x86 Baseline 5회 측정 전에 Harness를 x86에서 1~2회 먼저 실행
+  - 사람이 실행 옵션을 직접 입력하지 않아도 같은 조건이 반복되는지 확인
+  - Run별 로그 경로와 Run ID가 겹치지 않는지 확인
+  - golden CSV 검증과 실패 처리가 정상적으로 동작하는지 확인
+- 측정 준비가 끝나면 Working Tree 정리
+  - 스크립트와 문서를 모두 커밋
+  - `git status`가 clean인지 확인
+  - 8/31에는 코드 변경 없이 x86 Baseline 측정만 진행
