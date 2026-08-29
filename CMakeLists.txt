@@ -9,18 +9,29 @@ project(jetson_adas_fcw CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 프로젝트에서 사용하는 OpenCV 모듈을 찾는다.
-# freetype은 ADAS 앱의 한글 텍스트 렌더링에 사용한다.
-# 실제로 각 타깃이 사용할 OpenCV 모듈은
-# 하위 CMakeLists.txt의 target_link_libraries()에서 결정한다.
-find_package(OpenCV REQUIRED COMPONENTS
-    core
-    imgproc
-    videoio
-    dnn
-    video
-    freetype
-)
+# 한글 오버레이에 사용하는 OpenCV freetype 모듈을 선택적으로 사용한다.
+# 기본값은 ON이며, freetype이 없는 환경에서는
+# -DENABLE_FREETYPE=OFF로 빌드할 수 있다.
+option(ENABLE_FREETYPE "opencv_freetype 기반 한글 오버레이 사용" ON)
+
+if(ENABLE_FREETYPE)
+    find_package(OpenCV REQUIRED COMPONENTS
+        core
+        imgproc
+        videoio
+        dnn
+        video
+        freetype
+    )
+else()
+    find_package(OpenCV REQUIRED COMPONENTS
+        core
+        imgproc
+        videoio
+        dnn
+        video
+    )
+endif()
 
 # 각 모듈의 빌드 설정은 해당 디렉터리의 CMakeLists.txt에서 관리한다.
 add_subdirectory(perception)

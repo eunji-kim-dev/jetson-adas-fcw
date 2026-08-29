@@ -191,7 +191,7 @@ int main(int argc, char* argv[]) {
 
     runLogger.setTemperatureEnd(
         jetson_env::readSocTemperatureC()
-    )
+    );
 
     runLogger.finish();
     writer.release();

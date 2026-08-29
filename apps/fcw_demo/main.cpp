@@ -31,7 +31,9 @@
 #include "RunOptions.hpp"
 #include "JetsonEnv.hpp"
 #include <opencv2/core.hpp>
+#ifdef ADAS_HAS_FREETYPE
 #include <opencv2/freetype.hpp>
+#endif
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <algorithm>
@@ -183,16 +185,21 @@ private:
 class KoreanTextRenderer {
 public:
     bool initialize() {
+#ifndef ADAS_HAS_FREETYPE
+        // freetype 없는 빌드에서는 OpenCV 기본 Hershey 글꼴로 대체
+        fontPath_ = "OpenCV Hershey fallback";
+        return true;
+#else
         std::vector<std::string> fontCandidates;
-
         if (const char* customFont = std::getenv("ADAS_KOREAN_FONT")) {
             if (*customFont != '\0') fontCandidates.emplace_back(customFont);
         }
-
-        fontCandidates.emplace_back("/usr/share/fonts/truetype/nanum/NanumGothic.ttf");
-        fontCandidates.emplace_back("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf");
-        fontCandidates.emplace_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
-        fontCandidates.emplace_back("/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf");
+        fontCandidates.insert(fontCandidates.end(), {
+            "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+            "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
+        });
 
         for (const std::string& fontPath : fontCandidates) {
             if (!std::filesystem::exists(fontPath)) continue;
@@ -206,20 +213,36 @@ public:
             }
         }
         return false;
+#endif
     }
 
-    void putText(cv::Mat& image, const std::string& text, const cv::Point& origin, int fontHeight, const cv::Scalar& color, int thickness = -1) const {
-        renderer_->putText(image, text, origin, fontHeight, color, thickness, cv::LINE_AA, false);
+    void putText(cv::Mat& image, const std::string& text, const cv::Point& origin,
+                 int fontHeight, const cv::Scalar& color, int thickness = -1) const {
+#ifdef ADAS_HAS_FREETYPE
+        renderer_->putText(image, text, origin, fontHeight, color,
+                           thickness, cv::LINE_AA, false);
+#else
+        cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, fontHeight / 24.0,
+                    color, std::max(thickness, 1), cv::LINE_AA);
+#endif
     }
 
-    cv::Size getTextSize(const std::string& text, int fontHeight, int thickness, int* baseline) const {
+    cv::Size getTextSize(const std::string& text, int fontHeight,
+                         int thickness, int* baseline) const {
+#ifdef ADAS_HAS_FREETYPE
         return renderer_->getTextSize(text, fontHeight, thickness, baseline);
+#else
+        return cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, fontHeight / 24.0,
+                               std::max(thickness, 1), baseline);
+#endif
     }
 
     const std::string& fontPath() const { return fontPath_; }
 
 private:
+#ifdef ADAS_HAS_FREETYPE
     cv::Ptr<cv::freetype::FreeType2> renderer_;
+#endif
     std::string fontPath_;
 };
 
