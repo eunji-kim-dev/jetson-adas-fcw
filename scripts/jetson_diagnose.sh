@@ -368,6 +368,107 @@ print("  CUDA", data["cuda"]["version"])
         fi
     fi
 
+    # TensorRT major version
+    # 8 과 10 은 C++ API 가 다름 (enqueueV2 / enqueueV3 등)
+    # 9월 TensorRTBackend 구현 전에 어느 쪽인지 확정해야 함
+    #
+    # 우선순위
+    #   1. NvInferVersion.h : 컴파일러가 실제로 보는 값이라 가장 정확함
+    #   2. libnvinfer.so.N  : 헤더가 없어도 실행 라이브러리는 있을 수 있음
+    #   3. dpkg 패키지 버전 : 위 둘이 다 없을 때 마지막 수단
+
+    echo
+    echo "TensorRT major version:"
+
+    # 헤더 위치는 CPU 아키텍처마다 다름 (Jetson: aarch64, PC: x86_64)
+    # 후보를 순서대로 보고 처음 찾은 것에서 멈춤
+    tensorrt_header=""
+
+    for candidate in \
+        /usr/include/aarch64-linux-gnu/NvInferVersion.h \
+        /usr/include/x86_64-linux-gnu/NvInferVersion.h \
+        /usr/include/NvInferVersion.h \
+        /usr/local/include/NvInferVersion.h; do
+
+        if [ -f "${candidate}" ]; then
+            tensorrt_header="${candidate}"
+            break
+        fi
+    done
+
+    tensorrt_major=""
+    tensorrt_major_source=""
+
+    # 1순위: 헤더의 #define NV_TENSORRT_MAJOR
+    if [ -n "${tensorrt_header}" ]; then
+        tensorrt_major="$(
+            grep -m1 'define NV_TENSORRT_MAJOR' "${tensorrt_header}" 2>/dev/null \
+                | awk '{print $3}'
+        )"
+
+        # 숫자가 아니면 버림
+        # 일부 버전은 숫자 대신 매크로 이름을 넣어 둠 (TRT_MAJOR_ENTERPRISE 등)
+        case "${tensorrt_major}" in
+            ''|*[!0-9]*) tensorrt_major="" ;;
+        esac
+
+        if [ -n "${tensorrt_major}" ]; then
+            tensorrt_major_source="header: ${tensorrt_header}"
+        fi
+    fi
+
+    # 2순위: libnvinfer.so.N 의 N
+    if [ -z "${tensorrt_major}" ]; then
+        tensorrt_major="$(
+            ldconfig -p 2>/dev/null \
+                | grep -m1 'libnvinfer\.so\.' \
+                | sed 's/.*libnvinfer\.so\.//;s/ .*//' \
+                | cut -d. -f1
+        )"
+
+        case "${tensorrt_major}" in
+            ''|*[!0-9]*) tensorrt_major="" ;;
+        esac
+
+        if [ -n "${tensorrt_major}" ]; then
+            tensorrt_major_source="soname: libnvinfer.so.${tensorrt_major}"
+        fi
+    fi
+
+    # 3순위: dpkg 패키지 버전 문자열의 첫 숫자 (8.5.2-1+cuda11.4 -> 8)
+    if [ -z "${tensorrt_major}" ] && command -v dpkg-query >/dev/null 2>&1; then
+        tensorrt_major="$(
+            dpkg-query -W -f='${Version}\n' 'libnvinfer*' 2>/dev/null \
+                | head -n 1 \
+                | cut -d. -f1
+        )"
+
+        case "${tensorrt_major}" in
+            ''|*[!0-9]*) tensorrt_major="" ;;
+        esac
+
+        if [ -n "${tensorrt_major}" ]; then
+            tensorrt_major_source="dpkg: libnvinfer package version"
+        fi
+    fi
+
+    if [ -n "${tensorrt_major}" ]; then
+        echo "  major : ${tensorrt_major}"
+        echo "  source: ${tensorrt_major_source}"
+    else
+        echo "  major : NOT FOUND"
+        echo "  NvInferVersion.h / libnvinfer 없음"
+    fi
+
+    # 헤더가 있으면 MAJOR/MINOR/PATCH/BUILD 를 그대로 남김
+    if [ -n "${tensorrt_header}" ]; then
+        echo "  version defines:"
+
+        grep -E 'define NV_TENSORRT_(MAJOR|MINOR|PATCH|BUILD)' \
+            "${tensorrt_header}" 2>/dev/null \
+            | sed 's/^/    /'
+    fi
+
     echo
     echo "Power tools:"
 

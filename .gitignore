@@ -28,3 +28,7 @@ results/runs/
 # Jetson 진단 로그
 results/diagnostics/
 build_noft/
+
+# Benchmark Harness 산출물
+results/benchmark_sessions/
+results/benchmark_archives/
