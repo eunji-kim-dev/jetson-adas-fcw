@@ -6,8 +6,11 @@
 #   bash scripts/benchmark_harness.sh <실험이름>
 #   예: bash scripts/benchmark_harness.sh baseline_x86
 #
-# [1단계 골격] Preflight 검사와 Session / Run ID 생성까지만 수행함
-#              ADAS 실행과 판정은 다음 단계에서 추가함
+# 사람이 입력하는 것은 실험 이름 하나뿐이고,
+# 나머지 측정 조건은 아래 상수로 고정함
+#
+# Power Mode 는 nvpmodel 이 있으면 장비에서 읽고, 없으면 DEFAULT_POWER_MODE 를 씀
+# Run 전후로 장비 상태(Power Mode, 클럭, 온도, 부하)를 device_before / device_after 에 남김
 
 set -euo pipefail
 
@@ -22,7 +25,7 @@ readonly WARMUP_FRAMES=15
 readonly MEASURED_FRAMES=1237
 
 readonly BACKEND="opencv_dnn"
-readonly POWER_MODE="ac_balanced"
+readonly DEFAULT_POWER_MODE="ac_balanced"
 
 readonly BINARY_REL="build/apps/adas"
 readonly INPUT_REL="videos/input.mp4"
@@ -121,6 +124,82 @@ require_file() {
 
 
 # ------------------------------------------------------------
+# 장비 상태 기록
+# ------------------------------------------------------------
+# Jetson 이 아니거나 도구가 없어도 멈추지 않고 NOT FOUND / N/A 로 남김
+# 온도는 thermal_zone 의 temp 가 milli-degree 라 1000 으로 나눠서 같이 적음
+
+record_device_state() {
+    local out_file="$1"
+    local label="$2"
+
+    {
+        printf 'label     : %s\n' "${label}"
+        printf 'timestamp : %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        echo
+
+        echo "[nvpmodel]"
+        if command -v nvpmodel >/dev/null 2>&1; then
+            nvpmodel -q 2>/dev/null || echo "query failed"
+        else
+            echo "NOT FOUND"
+        fi
+        echo
+
+        echo "[jetson_clocks]"
+        if command -v jetson_clocks >/dev/null 2>&1; then
+            if jetson_clocks --show 2>/dev/null; then
+                :
+            elif sudo -n jetson_clocks --show 2>/dev/null; then
+                :
+            else
+                echo "권한 없음 (sudo 필요)"
+            fi
+        else
+            echo "NOT FOUND"
+        fi
+        echo
+
+        echo "[thermal]"
+        local zone zone_type temp_raw found_zone=0
+        for zone in /sys/devices/virtual/thermal/thermal_zone*; do
+            [[ -r "${zone}/temp" ]] || continue
+            found_zone=1
+            zone_type="$(cat "${zone}/type" 2>/dev/null || echo unknown)"
+            temp_raw="$(cat "${zone}/temp" 2>/dev/null || echo "")"
+
+            if [[ "${temp_raw}" =~ ^-?[0-9]+$ ]]; then
+                printf '%s: %s (%s C)\n' "${zone_type}" "${temp_raw}" \
+                    "$(awk -v t="${temp_raw}" 'BEGIN { printf "%.1f", t / 1000 }')"
+            else
+                printf '%s: read failed\n' "${zone_type}"
+            fi
+        done
+        [[ "${found_zone}" -eq 1 ]] || echo "N/A"
+        echo
+
+        echo "[cpufreq kHz]"
+        local cpu found_cpu=0
+        for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+            [[ -r "${cpu}/cpufreq/scaling_cur_freq" ]] || continue
+            found_cpu=1
+            printf '%s: %s\n' "$(basename "${cpu}")" \
+                "$(cat "${cpu}/cpufreq/scaling_cur_freq" 2>/dev/null || echo '?')"
+        done
+        [[ "${found_cpu}" -eq 1 ]] || echo "N/A"
+        echo
+
+        echo "[loadavg]"
+        cat /proc/loadavg 2>/dev/null || echo "N/A"
+        echo
+
+        echo "[memory]"
+        free -m 2>/dev/null || echo "N/A"
+    } > "${out_file}"
+}
+
+
+# ------------------------------------------------------------
 # Preflight
 # ------------------------------------------------------------
 
@@ -158,6 +237,37 @@ if [[ -f "${GOLDEN_REL}" ]]; then
 else
     fail "golden CSV 없음: ${GOLDEN_REL}"
 fi
+echo
+
+echo "Power Mode"
+# nvpmodel 이 있으면 장비가 말하는 값을 쓰고, 없으면 기본값을 씀
+# 사람이 값을 치지 않게 해서 로그에 틀린 Power Mode 가 남는 일을 막음
+POWER_MODE=""
+POWER_MODE_SOURCE=""
+
+if command -v nvpmodel >/dev/null 2>&1; then
+    POWER_MODE="$(
+        nvpmodel -q 2>/dev/null \
+            | tr -d '\r' \
+            | sed -n 's/^NV Power Mode: *//p' \
+            | head -n 1 \
+            || true
+    )"
+
+    if [[ -n "${POWER_MODE}" ]]; then
+        POWER_MODE_SOURCE="nvpmodel"
+    else
+        warn "nvpmodel 은 있으나 Power Mode 를 읽지 못함 — 기본값 사용"
+    fi
+fi
+
+if [[ -z "${POWER_MODE}" ]]; then
+    POWER_MODE="${DEFAULT_POWER_MODE}"
+    POWER_MODE_SOURCE="default"
+fi
+
+readonly POWER_MODE POWER_MODE_SOURCE
+ok "power mode: ${POWER_MODE} (${POWER_MODE_SOURCE})"
 echo
 
 echo "Git 상태 (측정 중단 사유는 아님)"
@@ -225,7 +335,7 @@ printf '  binary          : %s\n' "${BINARY_REL}"
 printf '  input           : %s\n' "${INPUT_REL}"
 printf '  model           : %s\n' "${MODEL_REL}"
 printf '  backend         : %s\n' "${BACKEND}"
-printf '  power mode      : %s\n' "${POWER_MODE}"
+printf '  power mode      : %s (%s)\n' "${POWER_MODE}" "${POWER_MODE_SOURCE}"
 printf '  warmup frames   : %s\n' "${WARMUP_FRAMES}"
 printf '  measured frames : %s\n' "${MEASURED_FRAMES}"
 printf '  total frames    : %s\n' "$((WARMUP_FRAMES + MEASURED_FRAMES))"
@@ -240,6 +350,7 @@ for ((run_index = 1; run_index <= RUN_COUNT; run_index++)); do
     printf '    run %02d : %s\n' "${run_index}" "$(run_id_for "${run_index}")"
 done
 echo
+
 
 # ------------------------------------------------------------
 # Session Summary 초기화
@@ -283,6 +394,9 @@ run_one() {
     # 남겨 두면 ADAS 가 실패했을 때 앞 Run 의 파일을 검증해 잘못 PASS 가 됨
     rm -f "${FCW_CSV_REL}"
 
+    # 시작 전 장비 상태 (측정 구간 밖에서 기록함)
+    record_device_state "${run_dir}/device_before.txt" "before"
+
     local started_at
     started_at="$(date '+%Y-%m-%d %H:%M:%S')"
     local start_seconds="${SECONDS}"
@@ -302,6 +416,9 @@ run_one() {
         > "${stdout_log}" 2>&1 || exit_code=$?
 
     local elapsed_s=$((SECONDS - start_seconds))
+
+    # 종료 직후 장비 상태
+    record_device_state "${run_dir}/device_after.txt" "after"
 
     printf '  elapsed : %d s\n' "${elapsed_s}"
     printf '  exit    : %d\n' "${exit_code}"
@@ -424,6 +541,7 @@ for ((run_index = 1; run_index <= RUN_COUNT; run_index++)); do
     fi
 done
 
+
 # ------------------------------------------------------------
 # Session Manifest
 # ------------------------------------------------------------
@@ -449,6 +567,7 @@ input_md5="$(md5sum "${INPUT_REL}" | awk '{print $1}')"
     printf 'model             : %s\n' "${MODEL_REL}"
     printf 'backend           : %s\n' "${BACKEND}"
     printf 'power_mode        : %s\n' "${POWER_MODE}"
+    printf 'power_mode_source : %s\n' "${POWER_MODE_SOURCE}"
     printf 'warmup_frames     : %s\n' "${WARMUP_FRAMES}"
     printf 'measured_frames   : %s\n' "${MEASURED_FRAMES}"
     printf 'total_frames      : %s\n' "$((WARMUP_FRAMES + MEASURED_FRAMES))"
