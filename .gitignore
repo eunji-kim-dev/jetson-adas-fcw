@@ -20,7 +20,7 @@ results/runs/
 *.onnx
 
 # Python 가상환경
-.venv/
+.venv*/
 
 # YOLO 원본 모델
 *.pt
