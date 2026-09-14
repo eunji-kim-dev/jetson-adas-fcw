@@ -317,10 +317,14 @@ int main(int argc, char* argv[]) {
     const int height = source.height();
     const double sourceFps = source.fps();
 
-    cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
-    if (!writer.isOpened()) {
-        std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
-        return 1;
+    // --no-video 면 writer 를 열지 않음. 안 열린 writer 는 write/release 가 no-op
+    cv::VideoWriter writer;
+    if (options.writeVideo) {
+        writer.open(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
+        if (!writer.isOpened()) {
+            std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
+            return 1;
+        }
     }
 
     std::ofstream csvFile(csvPath);
@@ -387,8 +391,10 @@ int main(int argc, char* argv[]) {
     runMetadata.nmsThreshold = nmsThreshold;
     runMetadata.warmupFrames = options.warmupFrames;
     runMetadata.measuredFrames = options.measuredFrames;
-    runMetadata.deadlineMs = 1000.0 / sourceFps;
-
+    // 평가 기준은 최적화 실험 전에 고정해야 하므로 인자로 받음
+    // 안 주면 예전처럼 영상 fps 기준 (1000/fps) 을 씀
+    runMetadata.deadlineMs = options.deadlineMs > 0.0 ? options.deadlineMs : 1000.0 / sourceFps;
+ 
     std::unique_ptr<RunLogger> runLoggerPtr;
     try {
         runLoggerPtr = std::make_unique<RunLogger>("results/runs", runMetadata);
@@ -667,7 +673,7 @@ int main(int argc, char* argv[]) {
             << ttcText
             << '\n';
 
-        writer.write(frame);
+        if (options.writeVideo) writer.write(frame);
         const auto outputEnd = std::chrono::steady_clock::now();
 
         // 실행 로그 한 행 — 어느 측정 구간에도 포함되지 않도록 모든 시각을 잰 뒤에 기록
@@ -737,7 +743,8 @@ int main(int argc, char* argv[]) {
     std::cout << "평균 추론 시간: " << std::fixed << std::setprecision(2) << averageInferenceMilliseconds << " ms\n";
     std::cout << "추론 기준 FPS: " << std::fixed << std::setprecision(2) << inferenceFps << " FPS\n";
     std::cout << "전체 처리 속도: " << std::fixed << std::setprecision(2) << processingFps << " FPS\n";
-    std::cout << "결과 파일: " << outputPath << '\n';
+    if (options.writeVideo) std::cout << "결과 파일: " << outputPath << '\n';
+    else                    std::cout << "결과 영상: 생략 (--no-video)\n";
     std::cout << "실행 로그: " << runLogger.runDirectory() << '\n';
 
     return 0;

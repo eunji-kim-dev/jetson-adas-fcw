@@ -12,6 +12,8 @@
  *   --power-mode <str>         기본 unspecified (run_summary.json 기록용)
  *   --warmup-frames <n>        기본 0 (기록만 함, 제외는 분석 스크립트가)
  *   --measured-frames <n>      기본 0 = 끝까지, 아니면 warmup + n 프레임에서 정지
+ *   --deadline-ms <ms>         기본 0 = 입력 영상 fps 에서 계산 (1000/fps), 주면 그 값으로 고정
+ *   --no-video                 결과 영상을 쓰지 않음 (측정 run 용, 인코딩 부하와 디스크 I/O 제거)
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -20,12 +22,15 @@ struct RunOptions {
     std::string powerMode = "unspecified";
     int warmupFrames = 0;
     int measuredFrames = 0;
+    double deadlineMs = 0.0;   // 0 이면 영상 fps 기준
+    bool writeVideo = true;
 };
 
 inline void printUsage(const std::string& programName) {
     std::cerr << "사용법: " << programName
               << " [입력 영상 경로] [--backend opencv_dnn] [--run-id ID] [--power-mode MODE]"
-              << " [--warmup-frames N] [--measured-frames N]\n";
+              << " [--warmup-frames N] [--measured-frames N]"
+              << " [--deadline-ms MS] [--no-video]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -55,6 +60,22 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         return true;
     };
 
+    auto takeDouble = [&](int& i, const std::string& option, double& out) {
+        std::string text;
+        if (!takeValue(i, option, text)) return false;
+        try {
+            out = std::stod(text);
+        } catch (const std::exception&) {
+            std::cerr << "[ERROR] " << option << " 값이 숫자가 아님: " << text << '\n';
+            return false;
+        }
+        if (out <= 0.0) {
+            std::cerr << "[ERROR] " << option << " 값은 0 보다 커야 함: " << text << '\n';
+            return false;
+        }
+        return true;
+    };    
+
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "--backend") {
@@ -69,6 +90,10 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             if (!takeInt(i, argument, options.warmupFrames)) return false;
         } else if (argument == "--measured-frames") {
             if (!takeInt(i, argument, options.measuredFrames)) return false;
+        } else if (argument == "--deadline-ms") {
+            if (!takeDouble(i, argument, options.deadlineMs)) return false;
+        } else if (argument == "--no-video") {
+            options.writeVideo = false;
         } else if (argument.rfind("--", 0) == 0) {
             std::cerr << "[ERROR] 알 수 없는 옵션: " << argument << '\n';
             printUsage(programName);

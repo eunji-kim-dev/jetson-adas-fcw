@@ -78,10 +78,14 @@ int main(int argc, char* argv[]) {
     const int height = source.height();
     const double sourceFps = source.fps();
 
-    cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
-    if (!writer.isOpened()) {
-        std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
-        return 1;
+    // --no-video 면 writer 를 열지 않음. 안 열린 writer 는 write/release 가 no-op
+    cv::VideoWriter writer;
+    if (options.writeVideo) {
+        writer.open(outputPath, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), sourceFps, cv::Size(width, height));
+        if (!writer.isOpened()) {
+            std::cerr << "[ERROR] 결과 영상 생성 실패: " << outputPath << '\n';
+            return 1;
+        }
     }
 
     // 실행 로그 — adas 와 같은 스키마, FCW 관련 컬럼은 빈 칸
@@ -108,7 +112,9 @@ int main(int argc, char* argv[]) {
     runMetadata.nmsThreshold = nmsThreshold;
     runMetadata.warmupFrames = options.warmupFrames;
     runMetadata.measuredFrames = options.measuredFrames;
-    runMetadata.deadlineMs = 1000.0 / sourceFps;
+    // 평가 기준은 최적화 실험 전에 고정해야 하므로 인자로 받음
+    // 안 주면 예전처럼 영상 fps 기준 (1000/fps) 을 씀
+    runMetadata.deadlineMs = options.deadlineMs > 0.0 ? options.deadlineMs : 1000.0 / sourceFps;
 
     std::unique_ptr<RunLogger> runLoggerPtr;
     try {
@@ -156,7 +162,7 @@ int main(int argc, char* argv[]) {
             std::cout << "frame=" << processedFrames << " detections=" << detections.size() << " tracks=" << trackedObjects.size() << '\n';
         }
 
-        writer.write(frame);
+        if (options.writeVideo) writer.write(frame);
         const auto outputEnd = std::chrono::steady_clock::now();
 
         FrameRecord record;
@@ -197,7 +203,8 @@ int main(int argc, char* argv[]) {
     writer.release();
 
     std::cout << "[SUCCESS] perception 단독 실행 완료: " << processedFrames << " 프레임 처리\n";
-    std::cout << "결과 파일: " << outputPath << '\n';
+    if (options.writeVideo) std::cout << "결과 파일: " << outputPath << '\n';
+    else                    std::cout << "결과 영상: 생략 (--no-video)\n";
     std::cout << "실행 로그: " << runLogger.runDirectory() << '\n';
     return 0;
 }

@@ -609,7 +609,9 @@ echo "결과 영상"
 # --video off 를 주려면 바이너리가 그 플래그를 받아야 함
 VIDEO_FLAG_SUPPORTED=0
 if [[ -x "${BINARY_REL}" ]]; then
-    if "./${BINARY_REL}" --help 2>&1 | grep -q -- '--no-video'; then
+    # --help 는 바이너리가 종료 코드 1 로 끝내므로 pipefail 에 걸리지 않게 먼저 받아둠
+    help_text="$("./${BINARY_REL}" --help 2>&1 || true)"
+    if grep -q -- '--no-video' <<< "${help_text}"; then
         VIDEO_FLAG_SUPPORTED=1
     fi
 fi
@@ -681,14 +683,14 @@ ok "power mode: ${POWER_MODE} (${POWER_MODE_SOURCE})"
 echo
 
 echo "권한"
-if ensure_sudo; then
-    ok "sudo 사용 가능 — 세션 동안 갱신함"
-else
-    if tegrastats_available || clocks_available; then
-        warn "sudo 를 못 씀 — tegrastats / jetson_clocks 가 제한될 수 있음"
+if tegrastats_available || clocks_available; then
+    if ensure_sudo; then
+        ok "sudo 사용 가능 — 세션 동안 갱신함"
     else
-        ok "sudo 필요 없음 (tegrastats, jetson_clocks 둘 다 없음)"
+        warn "sudo 를 못 씀 — tegrastats / jetson_clocks 가 제한될 수 있음"
     fi
+else
+    ok "sudo 필요 없음 (tegrastats, jetson_clocks 둘 다 없음)"
 fi
 echo
 
@@ -878,6 +880,7 @@ run_one() {
         --warmup-frames "${WARMUP_FRAMES}"
         --measured-frames "${MEASURED_FRAMES}"
         --run-id "${run_id}"
+        --deadline-ms "${DEADLINE_MS}"
     )
 
     if [[ "${VIDEO_MODE}" == "off" ]]; then
