@@ -57,7 +57,7 @@ readonly REQUIRED_BUILD_TYPE="Release"
 # 15 FPS 기준 1프레임 예산. 실제 계산은 tools/deadline_report.py 가 함
 readonly DEADLINE_MS=66.7
 # 지금은 처리시간 기준. V4L2 카메라를 붙이면 frame_age_ms 로 바꿀 자리임
-readonly DEADLINE_TARGET="processing_ms"
+readonly DEADLINE_TARGET="total_processing_ms"
 
 readonly TEGRASTATS_INTERVAL_MS=1000
 

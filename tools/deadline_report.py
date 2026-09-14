@@ -22,8 +22,9 @@ import sys
 # ------------------------------------------------------------
 
 DEADLINE_MS = 66.7          # 15 FPS 기준 1프레임 예산
-DEADLINE_TARGET = "processing_ms"   # 카메라 붙이면 frame_age_ms 로 바꿀 자리
+DEADLINE_TARGET = "total_processing_ms"   # 카메라 붙이면 frame_age_ms 로 바꿀 자리
 TRAILING_RATIO = 0.20       # 안정 구간으로 보는 뒤쪽 비율
+WARMUP_SKIP = 15            # 로그 앞쪽 warmup 프레임 수. 통계에서 뺌
 STREAK_ALERT = 3            # 연속 초과가 이 개수 이상이면 따로 셈
 
 
@@ -44,7 +45,7 @@ def pick_column(fieldnames):
     lowered = {f.lower(): f for f in fieldnames}
     if DEADLINE_TARGET in lowered:
         return lowered[DEADLINE_TARGET]
-    for c in ("processing_ms", "total_ms", "pipeline_ms", "frame_ms", "latency_ms"):
+    for c in ("total_processing_ms", "processing_ms", "detect_ms", "total_ms"):
         if c in lowered:
             return lowered[c]
     return None
@@ -137,6 +138,7 @@ def main():
         "deadline_ms": DEADLINE_MS,
         "deadline_target": DEADLINE_TARGET,
         "trailing_ratio": TRAILING_RATIO,
+        "warmup_skip": WARMUP_SKIP,
         "runs": {},
     }
 
@@ -150,6 +152,9 @@ def main():
 
     for d in dirs:
         vals, col = load(os.path.join(d, "raw_frame_log.csv"))
+        # warmup 은 로그에 같이 들어 있어서 여기서 뺌 (C++ 는 안 건드림)
+        logged = len(vals)
+        vals = vals[WARMUP_SKIP:]
         cut = int(len(vals) * (1 - TRAILING_RATIO))
         entries = [
             analyze(vals, "full"),
@@ -158,6 +163,8 @@ def main():
         entries = [e for e in entries if e]
         report["runs"][os.path.basename(d.rstrip("/"))] = {
             "column_used": col,
+            "logged_frames": logged,
+            "warmup_skipped": WARMUP_SKIP,
             "windows": entries,
         }
         for e in entries:
@@ -179,7 +186,8 @@ def main():
         print("안정구간 p50 %.1f~%.1f ms, 회차 간 변동폭 %.1f%%"
               % (min(trailing), max(trailing), spread))
 
-    out_path = "deadline_report.json"
+    # 리포트는 현재 위치가 아니라 대상 디렉터리 안에 남김
+    out_path = os.path.join(sys.argv[1], "deadline_report.json")
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     print("→ %s" % out_path)

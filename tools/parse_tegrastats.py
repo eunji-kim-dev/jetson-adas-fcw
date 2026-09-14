@@ -212,7 +212,7 @@ def summarize(rows):
 # ------------------------------------------------------------
 
 FRAME_TIME_CANDIDATES = [
-    "processing_ms", "total_ms", "pipeline_ms", "frame_ms",
+    "total_processing_ms", "processing_ms", "total_ms", "detect_ms",
     "latency_ms", "elapsed_ms", "proc_ms",
 ]
 FRAME_SEQ_CANDIDATES = ["frame_seq", "frame_id", "frame_index", "seq"]
