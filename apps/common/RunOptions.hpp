@@ -7,7 +7,7 @@
  * adas / perception_demo 공통 실행 옵션
  *
  *   [입력 영상 경로]            기본 videos/input.mp4
- *   --backend <name>           기본 opencv_dnn
+ *   --backend <name>           기본 opencv_dnn (opencv_dnn | tensorrt_fp32 | tensorrt_fp16)
  *   --run-id <id>              기본 YYYYmmdd-HHMMSS_<영상stem>_<backend> (비우면 RunLogger 가 생성)
  *   --power-mode <str>         기본 unspecified (run_summary.json 기록용)
  *   --warmup-frames <n>        기본 0 (기록만 함, 제외는 분석 스크립트가)
@@ -28,7 +28,7 @@ struct RunOptions {
 
 inline void printUsage(const std::string& programName) {
     std::cerr << "사용법: " << programName
-              << " [입력 영상 경로] [--backend opencv_dnn] [--run-id ID] [--power-mode MODE]"
+              << " [입력 영상 경로] [--backend NAME] [--run-id ID] [--power-mode MODE]"
               << " [--warmup-frames N] [--measured-frames N]"
               << " [--deadline-ms MS] [--no-video]\n";
 }

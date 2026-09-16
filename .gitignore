@@ -32,3 +32,6 @@ build_noft/
 # Benchmark Harness 산출물
 results/benchmark_sessions/
 results/benchmark_archives/
+
+# TensorRT 엔진 캐시 — GPU/버전에 묶여 있어 공유 못 함
+models/*.engine

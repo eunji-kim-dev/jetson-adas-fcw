@@ -30,15 +30,14 @@ readonly WAIT_SECONDS=900
 readonly WARMUP_FRAMES=15
 readonly MEASURED_FRAMES=1237
 
-readonly BACKEND="opencv_dnn"
+# 기본 백엔드. --backend 로 바꿀 수 있음 (opencv_dnn | tensorrt_fp32 | tensorrt_fp16)
+DEFAULT_BACKEND="opencv_dnn"
 readonly DEFAULT_POWER_MODE="ac_balanced"
 
 readonly BINARY_REL="build/apps/adas"
 readonly INPUT_REL="videos/input.mp4"
 readonly MODEL_REL="models/yolov8n.onnx"
 
-readonly GOLDEN_REL="results/golden_baseline.csv"
-readonly GOLDEN_MD5="a0006c4a16dbe3f69c178fbc5c1b6b8e"
 
 readonly SESSIONS_ROOT_REL="results/benchmark_sessions"
 readonly ARCHIVES_ROOT_REL="results/benchmark_archives"
@@ -90,18 +89,25 @@ cd "${PROJECT_ROOT}"
 # ------------------------------------------------------------
 
 usage() {
-    echo "사용법: bash scripts/benchmark_harness.sh <실험이름> [--clocks on|off|asis] [--video on|off|asis]" >&2
+    echo "사용법: bash scripts/benchmark_harness.sh <실험이름> [--backend NAME] [--clocks on|off|asis] [--video on|off|asis]" >&2
     echo "  예:   bash scripts/benchmark_harness.sh baseline_x86" >&2
     echo "  예:   bash scripts/benchmark_harness.sh baseline_jetson_cpu --clocks on --video off" >&2
+    echo "  예:   bash scripts/benchmark_harness.sh trt_fp16_jetson --backend tensorrt_fp16 --clocks on --video off" >&2
     exit 2
 }
 
 EXPERIMENT_NAME=""
+BACKEND="${DEFAULT_BACKEND}"
 CLOCKS_MODE="asis"
 VIDEO_MODE="asis"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --backend)
+            [[ $# -ge 2 ]] || { echo "[ERROR] --backend 에 값이 없음" >&2; usage; }
+            BACKEND="$2"
+            shift 2
+            ;;
         --clocks)
             [[ $# -ge 2 ]] || { echo "[ERROR] --clocks 에 값이 없음" >&2; usage; }
             CLOCKS_MODE="$2"
@@ -151,8 +157,48 @@ if [[ ! "${VIDEO_MODE}" =~ ^(on|off|asis)$ ]]; then
     usage
 fi
 
-readonly EXPERIMENT_NAME CLOCKS_MODE VIDEO_MODE
+if [[ ! "${BACKEND}" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "[ERROR] --backend 값이 이상함: ${BACKEND}" >&2
+    usage
+fi
 
+readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE
+
+
+# ------------------------------------------------------------
+# Golden 기준 — (아키텍처, 백엔드) 쌍마다 따로 둠
+# ------------------------------------------------------------
+# - x86 과 ARM 은 부동소수점 연산 순서가 달라 YOLO 점수가 소수점 아래에서 갈림
+# - OpenCV DNN 과 TensorRT 는 커널이 달라 같은 장비에서도 점수가 갈림 (FP16 은 더 갈림)
+# - 같은 조합 안에서는 회차가 달라도 바이트 단위로 같아야 함 (결정적 동작 검증)
+# golden 이 아직 없는 조합은 MD5 비교를 건너뛰고 회차별 MD5 를 찍어 줌
+# 5회가 전부 같으면 그 값을 여기에 고정하면 됨
+
+ARCH="$(uname -m)"
+readonly ARCH
+
+GOLDEN_REL=""
+GOLDEN_MD5=""
+case "${ARCH}/${BACKEND}" in
+    x86_64/opencv_dnn)
+        GOLDEN_REL="results/golden_baseline.csv"
+        GOLDEN_MD5="a0006c4a16dbe3f69c178fbc5c1b6b8e"
+        ;;
+    aarch64/opencv_dnn)
+        GOLDEN_REL="results/golden_baseline_aarch64.csv"
+        GOLDEN_MD5="8afab13272a80b345b595e41484abb8f"
+        ;;
+    # 측정 뒤 채울 자리
+    # aarch64/tensorrt_fp32)
+    #     GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp32.csv"
+    #     GOLDEN_MD5=""
+    #     ;;
+    # aarch64/tensorrt_fp16)
+    #     GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16.csv"
+    #     GOLDEN_MD5=""
+    #     ;;
+esac
+readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
 # 입력 영상 이름에서 FCW 결과 CSV 경로를 유도
@@ -635,8 +681,11 @@ case "${VIDEO_MODE}" in
 esac
 echo
 
-echo "Golden 기준"
-if [[ -f "${GOLDEN_REL}" ]]; then
+echo "Golden 기준 (${ARCH} / ${BACKEND})"
+if [[ -z "${GOLDEN_MD5}" ]]; then
+    warn "이 조합의 golden 이 아직 없음 — MD5 비교를 건너뜀"
+    warn "5회 MD5 가 전부 같으면 그 값을 하네스에 golden 으로 고정할 것"
+elif [[ -f "${GOLDEN_REL}" ]]; then
     golden_actual_md5="$(md5sum "${GOLDEN_REL}" | awk '{print $1}')"
 
     if [[ "${golden_actual_md5}" == "${GOLDEN_MD5}" ]]; then
@@ -907,7 +956,9 @@ run_one() {
     # 클럭 상태가 Run 도중 바뀌었는지 확인
     # 열이 올라 EDP 제한이 들어오면 --show 출력이 달라짐
     local clocks_changed=0
-    if ! diff -q "${run_dir}/clocks_before.txt" "${run_dir}/clocks_after.txt" >/dev/null 2>&1; then
+    # 팬 PWM 과 CurrentFreq 는 부하 따라 흔들리는 상태값이라 비교에서 뺌. Min/Max/Governor 만 봄
+    clocks_policy() { sed -E 's/ CurrentFreq=[0-9]+//; /^FAN /d' "$1"; }
+    if ! diff -q <(clocks_policy "${run_dir}/clocks_before.txt") <(clocks_policy "${run_dir}/clocks_after.txt") >/dev/null 2>&1; then
         clocks_changed=1
         printf '  [WARN] Run 도중 클럭 상태가 바뀜\n' >&2
     fi
@@ -928,7 +979,9 @@ run_one() {
         fcw_csv_md5="$(md5sum "${FCW_CSV_REL}" | awk '{print $1}')"
         cp "${FCW_CSV_REL}" "${run_dir}/fcw_frames.csv"
 
-        if [[ "${fcw_csv_md5}" == "${GOLDEN_MD5}" ]]; then
+        if [[ -z "${GOLDEN_MD5}" ]]; then
+            md5_match=-1   # 비교 대상 없음
+        elif [[ "${fcw_csv_md5}" == "${GOLDEN_MD5}" ]]; then
             md5_match=1
         fi
     fi
@@ -967,6 +1020,9 @@ run_one() {
     if [[ "${fcw_csv_exists}" -ne 1 ]]; then
         result="FAIL"
         printf '  [FAIL] FCW 결과 CSV 없음: %s\n' "${FCW_CSV_REL}" >&2
+    elif [[ -z "${GOLDEN_MD5}" ]]; then
+        # golden 이 없는 조합. 값을 찍어서 나중에 고정할 수 있게 함
+        printf '  md5     : %s (golden 없음, 비교 생략)\n' "${fcw_csv_md5}"
     elif [[ "${md5_match}" -ne 1 ]]; then
         result="FAIL"
         printf '  [FAIL] FCW CSV MD5 불일치\n' >&2
@@ -1168,7 +1224,8 @@ input_md5="$(md5sum "${INPUT_REL}" | awk '{print $1}')"
     echo
 
     echo "----- 입력 무결성 -----"
-    printf 'golden_md5        : %s\n' "${GOLDEN_MD5}"
+    printf 'arch              : %s\n' "${ARCH}"
+    printf 'golden_md5        : %s\n' "${GOLDEN_MD5:-(없음 — ${ARCH}/${BACKEND} 조합 미정)}"
     printf 'model_md5         : %s\n' "${model_md5}"
     printf 'input_md5         : %s\n' "${input_md5}"
     echo
