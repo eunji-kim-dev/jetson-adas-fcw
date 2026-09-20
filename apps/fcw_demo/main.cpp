@@ -344,13 +344,35 @@ int main(int argc, char* argv[]) {
         cv::Point(static_cast<int>(width * 0.04F), static_cast<int>(height * 0.96F))
     };
 
-    // 현재 테스트 영상에서 내 차량이 주행하는 차선 ROI
-    const std::vector<cv::Point> egoLaneRoi = {
-        cv::Point(static_cast<int>(width * 0.40F), static_cast<int>(height * 0.65F)),
-        cv::Point(static_cast<int>(width * 0.48F), static_cast<int>(height * 0.65F)),
-        cv::Point(static_cast<int>(width * 0.68F), static_cast<int>(height * 0.95F)),
-        cv::Point(static_cast<int>(width * 0.10F), static_cast<int>(height * 0.95F))
-    };
+    // 내 차량이 주행하는 차선 ROI (LEAD 후보 판정에 쓰임)
+    // --lane-roi 가 있으면 영상별로 찍은 픽셀 좌표(TL,TR,BR,BL)를 쓰고,
+    // 없으면 기존 테스트 영상 기준 화면 비율 ROI 를 그대로 씀 (golden 보존)
+    std::vector<cv::Point> egoLaneRoi;
+    if (options.laneRoiPx.empty()) {
+        egoLaneRoi = {
+            cv::Point(static_cast<int>(width * 0.40F), static_cast<int>(height * 0.65F)),
+            cv::Point(static_cast<int>(width * 0.48F), static_cast<int>(height * 0.65F)),
+            cv::Point(static_cast<int>(width * 0.68F), static_cast<int>(height * 0.95F)),
+            cv::Point(static_cast<int>(width * 0.10F), static_cast<int>(height * 0.95F))
+        };
+        std::cout << "[INFO] ego lane ROI: 기본 비율 ROI 사용\n";
+    } else {
+        for (std::size_t k = 0; k < 8; k += 2) {
+            const int x = options.laneRoiPx[k];
+            const int y = options.laneRoiPx[k + 1];
+            // 영상 크기를 벗어난 점은 라벨과 영상이 안 맞는 신호이므로 바로 종료함
+            if (x < 0 || x >= width || y < 0 || y >= height) {
+                std::cerr << "[ERROR] --lane-roi 점 (" << x << "," << y << ") 이 영상 크기 "
+                          << width << "x" << height << " 를 벗어남\n";
+                return 1;
+            }
+            egoLaneRoi.emplace_back(x, y);
+        }
+        std::cout << "[INFO] ego lane ROI: --lane-roi 사용 TL(" << egoLaneRoi[0].x << "," << egoLaneRoi[0].y
+                  << ") TR(" << egoLaneRoi[1].x << "," << egoLaneRoi[1].y
+                  << ") BR(" << egoLaneRoi[2].x << "," << egoLaneRoi[2].y
+                  << ") BL(" << egoLaneRoi[3].x << "," << egoLaneRoi[3].y << ")\n";
+    }
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
     LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps);

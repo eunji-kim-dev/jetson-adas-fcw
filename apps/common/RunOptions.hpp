@@ -1,7 +1,9 @@
 #pragma once
 
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 /*
  * adas / perception_demo 공통 실행 옵션
@@ -14,6 +16,9 @@
  *   --measured-frames <n>      기본 0 = 끝까지, 아니면 warmup + n 프레임에서 정지
  *   --deadline-ms <ms>         기본 0 = 입력 영상 fps 에서 계산 (1000/fps), 주면 그 값으로 고정
  *   --no-video                 결과 영상을 쓰지 않음 (측정 run 용, 인코딩 부하와 디스크 I/O 제거)
+ *   --lane-roi <8개 정수>       영상별 ego lane ROI 를 원본 픽셀 좌표로 지정 (TL,TR,BR,BL 순서, 콤마 구분)
+ *                              예: --lane-roi 854,520,941,520,1257,925,198,925
+ *                              생략하면 기존 화면 비율 ROI 를 그대로 씀 (golden 보존)
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -24,13 +29,14 @@ struct RunOptions {
     int measuredFrames = 0;
     double deadlineMs = 0.0;   // 0 이면 영상 fps 기준
     bool writeVideo = true;
+    std::vector<int> laneRoiPx;   // 비어 있으면 기본 비율 ROI, 아니면 8개 (x1,y1,...,x4,y4)
 };
 
 inline void printUsage(const std::string& programName) {
     std::cerr << "사용법: " << programName
               << " [입력 영상 경로] [--backend NAME] [--run-id ID] [--power-mode MODE]"
               << " [--warmup-frames N] [--measured-frames N]"
-              << " [--deadline-ms MS] [--no-video]\n";
+              << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -94,6 +100,26 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             if (!takeDouble(i, argument, options.deadlineMs)) return false;
         } else if (argument == "--no-video") {
             options.writeVideo = false;
+        } else if (argument == "--lane-roi") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            // 콤마로 잘라 정수 8개로 읽음. 개수가 다르거나 숫자가 아니면 실패로 처리함
+            std::vector<int> values;
+            std::stringstream stream(text);
+            std::string token;
+            while (std::getline(stream, token, ',')) {
+                try {
+                    values.push_back(std::stoi(token));
+                } catch (const std::exception&) {
+                    std::cerr << "[ERROR] --lane-roi 값이 정수가 아님: " << token << '\n';
+                    return false;
+                }
+            }
+            if (values.size() != 8) {
+                std::cerr << "[ERROR] --lane-roi 는 정수 8개(x1,y1,...,x4,y4)여야 함, 받은 개수: " << values.size() << '\n';
+                return false;
+            }
+            options.laneRoiPx = values;
         } else if (argument.rfind("--", 0) == 0) {
             std::cerr << "[ERROR] 알 수 없는 옵션: " << argument << '\n';
             printUsage(programName);
