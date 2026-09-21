@@ -188,15 +188,14 @@ case "${ARCH}/${BACKEND}" in
         GOLDEN_REL="results/golden_baseline_aarch64.csv"
         GOLDEN_MD5="8afab13272a80b345b595e41484abb8f"
         ;;
-    # 측정 뒤 채울 자리
-    # aarch64/tensorrt_fp32)
-    #     GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp32.csv"
-    #     GOLDEN_MD5=""
-    #     ;;
-    # aarch64/tensorrt_fp16)
-    #     GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16.csv"
-    #     GOLDEN_MD5=""
-    #     ;;
+    aarch64/tensorrt_fp32)
+        GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp32.csv"
+        GOLDEN_MD5="f3c3eaa65c7d868bbbbc3d2279b3aa32"
+        ;;
+    aarch64/tensorrt_fp16)
+        GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16.csv"
+        GOLDEN_MD5="e3f698927fa40dfcc17c39668f6fe5d8"
+        ;;
 esac
 readonly GOLDEN_REL GOLDEN_MD5
 
