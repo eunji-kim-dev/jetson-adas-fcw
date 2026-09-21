@@ -209,6 +209,7 @@ readonly GOLDEN_REL GOLDEN_MD5
 input_basename="$(basename "${INPUT_REL}")"
 readonly INPUT_STEM="${input_basename%.*}"
 readonly FCW_CSV_REL="results/${INPUT_STEM}_frames.csv"
+readonly FCW_BANNER_REL="results/${INPUT_STEM}_banner.csv"
 
 
 # ------------------------------------------------------------
@@ -900,6 +901,7 @@ run_one() {
     # 이전 Run 이 남긴 결과 CSV 를 지움
     # 남겨 두면 ADAS 가 실패했을 때 앞 Run 의 파일을 검증해 잘못 PASS 가 됨
     rm -f "${FCW_CSV_REL}"
+    rm -f "${FCW_BANNER_REL}"
 
     # 배경 작업이 가라앉을 때까지 기다림 (측정 구간 밖)
     local idle_ok=1
@@ -978,6 +980,10 @@ run_one() {
         fcw_csv_exists=1
         fcw_csv_md5="$(md5sum "${FCW_CSV_REL}" | awk '{print $1}')"
         cp "${FCW_CSV_REL}" "${run_dir}/fcw_frames.csv"
+        # 배너 CSV 는 MD5 비교 대상이 아님. 있으면 같이 보관만 함
+        if [[ -f "${FCW_BANNER_REL}" ]]; then
+            cp "${FCW_BANNER_REL}" "${run_dir}/fcw_banner.csv"
+        fi
 
         if [[ -z "${GOLDEN_MD5}" ]]; then
             md5_match=-1   # 비교 대상 없음

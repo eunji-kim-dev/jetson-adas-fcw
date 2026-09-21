@@ -272,6 +272,8 @@ int main(int argc, char* argv[]) {
     const std::string inputStem = std::filesystem::path(inputPath).stem().string();
     const std::string outputPath = "results/" + inputStem + "_output.avi";
     const std::string csvPath = "results/" + inputStem + "_frames.csv";
+    // 경고 배너 기록용. 골든 MD5 대상인 _frames.csv 와 분리함
+    const std::string bannerCsvPath = "results/" + inputStem + "_banner.csv";
 
     std::filesystem::create_directories("results");
 
@@ -334,6 +336,15 @@ int main(int argc, char* argv[]) {
     }
 
     csvFile << "frame,sceneChanged,numDetections,detections,numTracks,tracks,activeLeadId,riskLevel,ttc\n";
+
+    // 프레임별 riskLevel 과 별개로, 실제 운전자에게 뜨는 배너 단계를 기록함
+    // 8프레임·3프레임 연속 확인과 유지 시간을 거친 값이라 riskLevel 과 다를 수 있음
+    std::ofstream bannerCsv(bannerCsvPath);
+    if (!bannerCsv.is_open()) {
+        std::cerr << "[ERROR] 배너 CSV 생성 실패: " << bannerCsvPath << '\n';
+        return 1;
+    }
+    bannerCsv << "frame,bannerLevel,activeLeadId,ttc\n";
 
     // 넓은 도로 관심 영역
     // 실제 위험 판단은 아래 egoLaneRoi의 선행 차량 한 대에만 적용
@@ -695,6 +706,14 @@ int main(int argc, char* argv[]) {
             << ttcText
             << '\n';
 
+        // 배너 기록. ttcText 는 위에서 만든 값을 그대로 씀
+        bannerCsv
+            << processedFrames << ','
+            << RiskAnalyzer::toString(warningPolicy.bannerLevel()) << ','
+            << activeLeadId << ','
+            << ttcText
+            << '\n';
+
         if (options.writeVideo) writer.write(frame);
         const auto outputEnd = std::chrono::steady_clock::now();
 
@@ -755,6 +774,7 @@ int main(int argc, char* argv[]) {
 
     writer.release();
     csvFile.close();
+    bannerCsv.close();
 
     std::cout << '\n';
     std::cout << "[SUCCESS] Step 7 장면 전환/검출 오류 보완 영상 생성 완료\n";
