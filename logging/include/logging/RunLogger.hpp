@@ -34,6 +34,7 @@ struct RunMetadata {
     std::string model;
     std::string modelHash;
     std::string fullCropStrategy;  // "full+crop_every_frame"
+    std::string laneRoi;           // "default" 또는 "x1,y1,...,x4,y4" (--lane-roi 픽셀 좌표)
     int detectionInterval = 1;
     double confidenceThreshold = 0.0;
     double nmsThreshold = 0.0;
@@ -95,7 +96,7 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

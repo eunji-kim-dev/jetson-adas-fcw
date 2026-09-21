@@ -24,7 +24,7 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMAS = {1, 2}
+SUPPORTED_SCHEMAS = {1, 2, 3}
 
 
 # ---------- 유틸 ----------

@@ -419,6 +419,17 @@ int main(int argc, char* argv[]) {
     runMetadata.model = modelPath;
     runMetadata.modelHash = RunLogger::hashFile(modelPath);
     runMetadata.fullCropStrategy = "full+crop_every_frame";
+    // 영상별 ROI 가 달라지므로 어느 ROI 로 나온 결과인지 run_summary 에 남김
+    if (options.laneRoiPx.empty()) {
+        runMetadata.laneRoi = "default";
+    } else {
+        std::ostringstream roiStream;
+        for (std::size_t k = 0; k < options.laneRoiPx.size(); ++k) {
+            if (k > 0) roiStream << ',';
+            roiStream << options.laneRoiPx[k];
+        }
+        runMetadata.laneRoi = roiStream.str();
+    }    
     runMetadata.detectionInterval = 1;
     runMetadata.confidenceThreshold = detectorThreshold;
     runMetadata.nmsThreshold = nmsThreshold;
