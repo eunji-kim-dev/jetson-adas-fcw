@@ -34,6 +34,6 @@ results/benchmark_sessions/
 results/benchmark_archives/
 
 # TensorRT 엔진 캐시 — GPU/버전에 묶여 있어 공유 못 함
-models/*.engineresults/*_banner.csv
+models/*.engine
 results/*_banner.csv
 models/
