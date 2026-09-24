@@ -9,7 +9,7 @@
  * adas / perception_demo 공통 실행 옵션
  *
  *   [입력 영상 경로]            기본 videos/input.mp4
- *   --backend <name>           기본 opencv_dnn (opencv_dnn | tensorrt_fp32 | tensorrt_fp16)
+ *   --backend <name>           기본 opencv_dnn (opencv_dnn | tensorrt_fp32 | tensorrt_fp16 | tensorrt_int8)
  *   --run-id <id>              기본 YYYYmmdd-HHMMSS_<영상stem>_<backend> (비우면 RunLogger 가 생성)
  *   --power-mode <str>         기본 unspecified (run_summary.json 기록용)
  *   --warmup-frames <n>        기본 0 (기록만 함, 제외는 분석 스크립트가)
@@ -22,6 +22,9 @@
  *   --crop-model <경로>         원거리 crop 추론에 쓸 ONNX (예: models/yolov8n_288x640.onnx)
  *   --crop-input <H>x<W>       그 모델의 입력 크기. 세로x가로 순서 (예: 288x640). --crop-model 과 같이 줘야 함
  *                              둘 다 생략하면 crop 도 전체 프레임과 같은 640x640 모델로 추론함 (golden 보존)
+ *   --calib-list <txt>         tensorrt_int8 전용. 전체 프레임 모델의 calibration 이미지 목록 (한 줄에 경로 하나)
+ *   --crop-calib-list <txt>    tensorrt_int8 + --crop-model 전용. crop 모델의 calibration 이미지 목록
+ *                              둘 다 int8 엔진을 처음 만들 때만 필요함. 엔진·캐시가 있으면 생략 가능
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -36,6 +39,8 @@ struct RunOptions {
     std::string cropModelPath;    // 비어 있으면 crop 도 전체 프레임 모델을 씀
     int cropInputHeight = 0;      // --crop-input 의 H. 0 이면 미지정
     int cropInputWidth = 0;       // --crop-input 의 W. 0 이면 미지정
+    std::string calibList;        // int8 전용. 전체 프레임 모델 calibration 이미지 목록
+    std::string cropCalibList;    // int8 전용. crop 모델 calibration 이미지 목록
 };
 
 inline void printUsage(const std::string& programName) {
@@ -43,7 +48,8 @@ inline void printUsage(const std::string& programName) {
               << " [입력 영상 경로] [--backend NAME] [--run-id ID] [--power-mode MODE]"
               << " [--warmup-frames N] [--measured-frames N]"
               << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
-              << " [--crop-model PATH --crop-input HxW]\n";
+              << " [--crop-model PATH --crop-input HxW]"
+              << " [--calib-list TXT] [--crop-calib-list TXT]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -127,6 +133,10 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 return false;
             }
             options.laneRoiPx = values;
+        } else if (argument == "--calib-list") {
+            if (!takeValue(i, argument, options.calibList)) return false;
+        } else if (argument == "--crop-calib-list") {
+            if (!takeValue(i, argument, options.cropCalibList)) return false;
         } else if (argument == "--crop-model") {
             if (!takeValue(i, argument, options.cropModelPath)) return false;
         } else if (argument == "--crop-input") {

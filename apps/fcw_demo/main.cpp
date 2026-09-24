@@ -300,11 +300,12 @@ int main(int argc, char* argv[]) {
     // --crop-model 이 있으면 원거리 crop 추론용 백엔드를 하나 더 만듦 (같은 backend 종류, 다른 모델·입력 크기)
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
-        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold);
+        // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
+        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList);
         std::unique_ptr<InferenceBackend> cropBackend;
         if (!options.cropModelPath.empty()) {
             const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
-            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize);
+            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList);
         }
         detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend));
     } catch (const std::exception& error) {
@@ -420,7 +421,8 @@ int main(int argc, char* argv[]) {
     runMetadata.runId = options.runId.empty() ? RunLogger::defaultRunId(inputStem, backendName) : options.runId;
     runMetadata.powerMode = options.powerMode;
     runMetadata.backend = backendName;
-    runMetadata.precision = "fp32";
+    // "tensorrt_fp16" → "fp16" 처럼 백엔드 이름에서 정밀도를 뽑음. opencv_dnn 은 fp32
+    runMetadata.precision = backendName.rfind("tensorrt_", 0) == 0 ? backendName.substr(std::string("tensorrt_").size()) : "fp32";
     runMetadata.temperatureStartC = jetson_env::readSocTemperatureC();
     runMetadata.jetsonClocks = jetson_env::readJetsonClocksActive();
     runMetadata.opencvVersion = CV_VERSION;

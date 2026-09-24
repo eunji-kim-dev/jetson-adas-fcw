@@ -7,6 +7,7 @@
 #include <cuda_runtime_api.h>
 
 #include <opencv2/dnn.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -67,6 +68,28 @@ std::string engineFileFor(const std::string& modelPath, const std::string& preci
     return p.string();
 }
 
+// <모델>.onnx → <모델>.int8.calib (calibration 캐시)
+std::string calibrationCacheFileFor(const std::string& modelPath) {
+    std::filesystem::path p(modelPath);
+    p.replace_extension(".int8.calib");
+    return p.string();
+}
+
+// calibration 목록 파일을 읽음. 한 줄에 이미지 경로 하나, 빈 줄과 # 줄은 무시함
+std::vector<std::string> readCalibrationList(const std::string& listPath) {
+    std::vector<std::string> paths;
+    if (listPath.empty()) return paths;
+    std::ifstream in(listPath);
+    if (!in) throw std::runtime_error("calibration 목록 파일을 못 읽음: " + listPath);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        paths.push_back(line);
+    }
+    return paths;
+}
+
 std::vector<char> readFile(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
@@ -82,10 +105,101 @@ bool engineIsStale(const std::string& modelPath, const std::string& enginePath) 
 }
 
 // ------------------------------------------------------------
+// INT8 calibrator
+// ------------------------------------------------------------
+// TensorRT 가 엔진을 만들면서 이미지를 한 장씩 달라고 하면(getBatch) 넘겨줌.
+// 전처리는 실행 때와 똑같이 letterbox + /255 + RGB 로 해야 스케일이 맞음.
+// 결과(층별 스케일)는 캐시 파일에 저장해 두고, 있으면 이미지를 안 읽고 그걸 씀.
+//
+// IInt8EntropyCalibrator2 와 kINT8 플래그는 TensorRT 10.1 부터 deprecated (Q/DQ explicit quantization 권고)
+// 지만 아직 동작함. 같은 FP32 ONNX 로 FP32/FP16/INT8 을 비교하는 게 목적이라 이 방식이 맞음.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+class Int8Calibrator : public nvinfer1::IInt8EntropyCalibrator2 {
+public:
+    Int8Calibrator(std::vector<std::string> imagePaths, std::string cachePath, const cv::Size& inputSize, std::size_t inputBytes)
+        : imagePaths_(std::move(imagePaths)), cachePath_(std::move(cachePath)), inputSize_(inputSize), inputBytes_(inputBytes) {
+        checkCuda(cudaMalloc(&deviceInput_, inputBytes_), "cudaMalloc(calibration input)");
+    }
+
+    ~Int8Calibrator() override {
+        if (deviceInput_) cudaFree(deviceInput_);
+    }
+
+    Int8Calibrator(const Int8Calibrator&) = delete;
+    Int8Calibrator& operator=(const Int8Calibrator&) = delete;
+
+    // ONNX 배치 차원이 1 로 고정돼 있어 한 장씩 넘김
+    int32_t getBatchSize() const noexcept override { return 1; }
+
+    // 다음 이미지를 전처리해서 GPU 입력 버퍼에 올림. 더 없으면 false → calibration 끝
+    bool getBatch(void* bindings[], const char* names[], int32_t nbBindings) noexcept override {
+        (void)names;
+        if (nbBindings < 1) return false;
+        while (nextIndex_ < imagePaths_.size()) {
+            const std::string& path = imagePaths_[nextIndex_++];
+            cv::Mat image = cv::imread(path, cv::IMREAD_COLOR);
+            if (image.empty()) {
+                std::cerr << "[TensorRT WARN] calibration 이미지를 못 읽음, 건너뜀: " << path << '\n';
+                continue;
+            }
+            // 실행 때(TensorRTBackend::infer)와 같은 전처리
+            const LetterboxResult prepared = letterbox(image, inputSize_);
+            cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, inputSize_, cv::Scalar(), true, false);
+            if (!blob.isContinuous() || blob.total() * sizeof(float) != inputBytes_) {
+                std::cerr << "[TensorRT WARN] calibration blob 크기가 입력과 다름, 건너뜀: " << path << '\n';
+                continue;
+            }
+            if (cudaMemcpy(deviceInput_, blob.ptr<float>(), inputBytes_, cudaMemcpyHostToDevice) != cudaSuccess) {
+                std::cerr << "[TensorRT ERROR] calibration H2D 복사 실패\n";
+                return false;
+            }
+            bindings[0] = deviceInput_;
+            ++usedCount_;
+            if (usedCount_ % 50 == 0) std::cerr << "[TensorRT] calibration " << usedCount_ << " / " << imagePaths_.size() << '\n';
+            return true;
+        }
+        return false;
+    }
+
+    // 캐시가 있으면 그걸 돌려줌 → TensorRT 가 getBatch 를 안 부름
+    const void* readCalibrationCache(std::size_t& length) noexcept override {
+        cache_ = readFile(cachePath_);
+        length = cache_.size();
+        if (!cache_.empty()) std::cerr << "[TensorRT] calibration 캐시 사용: " << cachePath_ << '\n';
+        return cache_.empty() ? nullptr : cache_.data();
+    }
+
+    // 새로 계산한 스케일을 캐시 파일로 저장
+    void writeCalibrationCache(const void* ptr, std::size_t length) noexcept override {
+        std::ofstream out(cachePath_, std::ios::binary);
+        if (!out) {
+            std::cerr << "[TensorRT WARN] calibration 캐시 저장 실패: " << cachePath_ << '\n';
+            return;
+        }
+        out.write(static_cast<const char*>(ptr), static_cast<std::streamsize>(length));
+        std::cerr << "[TensorRT] calibration 캐시 저장 (" << usedCount_ << " 장): " << cachePath_ << '\n';
+    }
+
+    std::size_t usedCount() const { return usedCount_; }
+
+private:
+    std::vector<std::string> imagePaths_;
+    std::string cachePath_;
+    cv::Size inputSize_;
+    std::size_t inputBytes_;
+    std::size_t nextIndex_ = 0;
+    std::size_t usedCount_ = 0;
+    void* deviceInput_ = nullptr;
+    std::vector<char> cache_;
+};
+#pragma GCC diagnostic pop
+
+// ------------------------------------------------------------
 // ONNX → 직렬화된 엔진
 // ------------------------------------------------------------
 
-std::vector<char> buildEngine(const std::string& modelPath, const std::string& precision, nvinfer1::ILogger& logger) {
+std::vector<char> buildEngine(const std::string& modelPath, const std::string& precision, const std::string& calibrationList, nvinfer1::ILogger& logger) {
     using namespace nvinfer1;
 
     std::unique_ptr<IBuilder> builder(createInferBuilder(logger));
@@ -112,6 +226,9 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
     // 빌드 중 커널 탐색용 작업 메모리. yolov8n 은 256MB 면 충분함
     config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 256ULL << 20);
 
+    // calibrator 는 buildSerializedNetwork 가 끝날 때까지 살아 있어야 해서 이 함수 범위에 둠
+    std::unique_ptr<Int8Calibrator> calibrator;
+
     if (precision == "fp16") {
         // kFP16 은 TensorRT 10.12 부터 deprecated (강타입 네트워크로 대체 권고) 지만 아직 동작함.
         // 같은 FP32 ONNX 로 FP32/FP16/INT8 을 비교하는 게 목적이라 약타입 방식이 맞음.
@@ -121,13 +238,44 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
         config->setFlag(BuilderFlag::kFP16);
 #pragma GCC diagnostic pop
     } else if (precision == "int8") {
-        throw std::runtime_error("int8 은 아직 미구현 (calibrator 필요)");
+        // 네트워크 입력 크기 [1, 3, H, W] 로 calibration 전처리 크기를 정함 (실행 때와 같은 letterbox)
+        if (network->getNbInputs() < 1) throw std::runtime_error("네트워크 입력이 없음");
+        const Dims in = network->getInput(0)->getDimensions();
+        if (in.nbDims != 4 || in.d[0] != 1 || in.d[1] != 3 || in.d[2] < 1 || in.d[3] < 1) {
+            throw std::runtime_error("int8 calibration 은 [1, 3, H, W] 고정 입력만 지원함: " + dimsToString(in));
+        }
+        const cv::Size inputSize(static_cast<int>(in.d[3]), static_cast<int>(in.d[2]));
+        const std::size_t inputBytes = volume(in) * sizeof(float);
+
+        const std::string cachePath = calibrationCacheFileFor(modelPath);
+        const std::vector<std::string> images = readCalibrationList(calibrationList);
+        if (images.empty() && !std::filesystem::exists(cachePath)) {
+            throw std::runtime_error(
+                "int8 엔진을 만들려면 calibration 이미지 목록(--calib-list / --crop-calib-list)이나 캐시 파일이 필요함: " + cachePath);
+        }
+        std::cerr << "[TensorRT] int8 calibration: 이미지 " << images.size() << " 장, 캐시 " << cachePath
+                  << (std::filesystem::exists(cachePath) ? " (있음, 이미지 대신 캐시 사용)" : " (없음, 새로 계산)") << '\n';
+
+        calibrator = std::make_unique<Int8Calibrator>(images, cachePath, inputSize, inputBytes);
+
+        // kINT8 / setInt8Calibrator 도 10.1 부터 deprecated 지만 동작함 (위 kFP16 과 같은 이유로 이 방식을 씀)
+        // INT8 로 못 만드는 층은 FP16 으로 떨어지게 kFP16 도 같이 켬
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        config->setFlag(BuilderFlag::kINT8);
+        config->setFlag(BuilderFlag::kFP16);
+        config->setInt8Calibrator(calibrator.get());
+#pragma GCC diagnostic pop
     } else if (precision != "fp32") {
-        throw std::runtime_error("모르는 정밀도: " + precision + " (fp32 | fp16)");
+        throw std::runtime_error("모르는 정밀도: " + precision + " (fp32 | fp16 | int8)");
     }
 
     std::unique_ptr<IHostMemory> serialized(builder->buildSerializedNetwork(*network, *config));
     if (!serialized) throw std::runtime_error("TensorRT 엔진 빌드 실패");
+
+    if (calibrator && calibrator->usedCount() > 0) {
+        std::cerr << "[TensorRT] int8 calibration 에 쓴 이미지: " << calibrator->usedCount() << " 장\n";
+    }
 
     const char* begin = static_cast<const char*>(serialized->data());
     return std::vector<char>(begin, begin + serialized->size());
@@ -179,7 +327,8 @@ struct TensorRTBackend::Impl {
 // 생성자: 엔진 준비 → I/O 텐서 조사 → 버퍼 할당 → 주소 바인딩
 // ------------------------------------------------------------
 
-TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold, const cv::Size& expectedInputSize)
+TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
+                                 const cv::Size& expectedInputSize, const std::string& calibrationList)
     : impl_(std::make_unique<Impl>()), confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
     using namespace nvinfer1;
 
@@ -204,7 +353,7 @@ TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string
     if (!impl_->engine) {
         std::cerr << "[TensorRT] 엔진 빌드 시작 (" << precision << "): " << modelPath << " — Jetson 에서 수 분 걸림\n";
         const auto buildStart = std::chrono::steady_clock::now();
-        blob = buildEngine(modelPath, precision, impl_->logger);
+        blob = buildEngine(modelPath, precision, calibrationList, impl_->logger);
         const double buildSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count();
 
         std::ofstream out(enginePath_, std::ios::binary);

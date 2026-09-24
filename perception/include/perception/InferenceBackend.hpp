@@ -44,11 +44,16 @@ public:
  * inputSize 는 모델의 입력 크기(가로 x 세로). 기본 640x640.
  *   - OpenCV DNN : 이 크기로 letterbox 와 blob 을 만듦 (ONNX 입력과 맞아야 함)
  *   - TensorRT   : 엔진에서 읽은 입력 크기와 다르면 예외 (엔진 캐시 오류 방지)
+ *
+ * calibrationList 는 tensorrt_int8 전용. Calibration 이미지 경로 목록 파일(한 줄에 하나).
+ *   INT8 엔진을 처음 만들 때만 필요하고, 엔진이나 calibration 캐시가 이미 있으면 비워도 됨.
+ *   다른 백엔드는 무시함.
  */
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
     const std::string& modelPath,
     float confidenceThreshold,
     float nmsThreshold,
-    const cv::Size& inputSize = cv::Size(640, 640)
+    const cv::Size& inputSize = cv::Size(640, 640),
+    const std::string& calibrationList = ""
 );

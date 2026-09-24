@@ -93,7 +93,7 @@ int main(int argc, char* argv[]) {
     runMetadata.runId = options.runId.empty() ? RunLogger::defaultRunId(inputStem + "_perception", backendName) : options.runId;
     runMetadata.powerMode = options.powerMode;
     runMetadata.backend = backendName;
-    runMetadata.precision = "fp32";
+    runMetadata.precision = backendName.rfind("tensorrt_", 0) == 0 ? backendName.substr(std::string("tensorrt_").size()) : "fp32";
     runMetadata.temperatureStartC = jetson_env::readSocTemperatureC();
     runMetadata.jetsonClocks = jetson_env::readJetsonClocksActive();
     runMetadata.opencvVersion = CV_VERSION;
