@@ -37,3 +37,6 @@ results/benchmark_archives/
 models/*.engine
 results/*_banner.csv
 models/
+
+# 평가셋 실행 결과
+results/eval/
