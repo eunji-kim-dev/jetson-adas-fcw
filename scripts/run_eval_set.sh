@@ -14,7 +14,7 @@ mkdir -p "${OUT_DIR}"
 
 # 헤더 건너뜀, 빈 줄·# 줄 무시, Windows 줄바꿈 제거
 tail -n +2 "${LIST}" | tr -d '\r' | grep -v '^[[:space:]]*$' | grep -v '^#' \
-| while IFS=, read -r id type group should_warn collision_frame x1 y1 x2 y2 x3 y3 x4 y4; do
+| while IFS=, read -r id type group should_warn collision_frame cf_status x1 y1 x2 y2 x3 y3 x4 y4; do
     video="${VIDEO_DIR}/${id}.mp4"
     if [[ ! -f "${video}" ]]; then
         echo "[SKIP] 영상 없음: ${video}" >&2
