@@ -93,6 +93,7 @@ usage() {
     echo "  예:   bash scripts/benchmark_harness.sh baseline_x86" >&2
     echo "  예:   bash scripts/benchmark_harness.sh baseline_jetson_cpu --clocks on --video off" >&2
     echo "  예:   bash scripts/benchmark_harness.sh trt_fp16_jetson --backend tensorrt_fp16 --clocks on --video off" >&2
+    echo "  crop 전용 모델: --crop-model models/yolov8n_288x640.onnx --crop-input 288x640 (둘 다 있어야 함, golden 비교는 건너뜀)" >&2
     exit 2
 }
 
@@ -100,6 +101,8 @@ EXPERIMENT_NAME=""
 BACKEND="${DEFAULT_BACKEND}"
 CLOCKS_MODE="asis"
 VIDEO_MODE="asis"
+CROP_MODEL=""
+CROP_INPUT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -116,6 +119,16 @@ while [[ $# -gt 0 ]]; do
         --video)
             [[ $# -ge 2 ]] || { echo "[ERROR] --video 에 값이 없음" >&2; usage; }
             VIDEO_MODE="$2"
+            shift 2
+            ;;
+        --crop-model)
+            [[ $# -ge 2 ]] || { echo "[ERROR] --crop-model 에 값이 없음" >&2; usage; }
+            CROP_MODEL="$2"
+            shift 2
+            ;;
+        --crop-input)
+            [[ $# -ge 2 ]] || { echo "[ERROR] --crop-input 에 값이 없음" >&2; usage; }
+            CROP_INPUT="$2"
             shift 2
             ;;
         -h|--help)
@@ -162,7 +175,19 @@ if [[ ! "${BACKEND}" =~ ^[A-Za-z0-9_]+$ ]]; then
     usage
 fi
 
-readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE
+# crop 옵션은 짝으로만 씀
+if [[ -n "${CROP_MODEL}" || -n "${CROP_INPUT}" ]]; then
+    if [[ -z "${CROP_MODEL}" || -z "${CROP_INPUT}" ]]; then
+        echo "[ERROR] --crop-model 과 --crop-input 은 같이 줘야 함" >&2
+        usage
+    fi
+    if [[ ! "${CROP_INPUT}" =~ ^[0-9]+x[0-9]+$ ]]; then
+        echo "[ERROR] --crop-input 은 HxW 형식이어야 함 (예: 288x640): ${CROP_INPUT}" >&2
+        usage
+    fi
+fi
+
+readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT
 
 
 # ------------------------------------------------------------
@@ -197,6 +222,13 @@ case "${ARCH}/${BACKEND}" in
         GOLDEN_MD5="e3f698927fa40dfcc17c39668f6fe5d8"
         ;;
 esac
+
+# crop 전용 모델은 구조가 달라 golden 과 같을 수 없음. MD5 비교를 건너뛰고 회차별 MD5 만 찍음
+# (같은 구조 안에서 5회가 전부 같은지는 그 MD5 로 확인)
+if [[ -n "${CROP_MODEL}" ]]; then
+    GOLDEN_REL=""
+    GOLDEN_MD5=""
+fi
 readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
@@ -842,6 +874,11 @@ printf '  idle gate       : loadavg < %s, 최대 %s s 대기\n' "${IDLE_LOADAVG_
 printf '  deadline        : %s ms (대상 %s)\n' "${DEADLINE_MS}" "${DEADLINE_TARGET}"
 printf '  fcw csv         : %s\n' "${FCW_CSV_REL}"
 printf '  run log root    : %s\n' "${RUNS_ROOT_REL}"
+if [[ -n "${CROP_MODEL}" ]]; then
+    printf '  crop model      : %s (%s)\n' "${CROP_MODEL}" "${CROP_INPUT}"
+else
+    printf '  crop model      : 전체 프레임과 같은 모델 (640x640)\n'
+fi
 echo
 
 echo "  예정 Run ID"
@@ -935,6 +972,9 @@ run_one() {
 
     if [[ "${VIDEO_MODE}" == "off" ]]; then
         bin_args+=(--no-video)
+    fi
+    if [[ -n "${CROP_MODEL}" ]]; then
+        bin_args+=(--crop-model "${CROP_MODEL}" --crop-input "${CROP_INPUT}")
     fi
 
     # set -e 가 켜져 있어도 || 왼쪽의 실패는 중단 사유가 아님

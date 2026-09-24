@@ -35,7 +35,9 @@ struct DetectionTiming {
  */
 class YoloDetector {
 public:
-    YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold);
+    // farBackend 를 주면 원거리 crop 추론에 그 백엔드를 씀 (예: 288x640 모델)
+    // 안 주면(nullptr) 전체 프레임과 같은 백엔드로 crop 도 추론함 (기존 동작, golden 보존)
+    YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend = nullptr);
 
     std::vector<Detection> detect(const cv::Mat& frame, DetectionTiming* timing = nullptr);
 
@@ -44,5 +46,6 @@ private:
     std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing);
 
     std::unique_ptr<InferenceBackend> backend_;
+    std::unique_ptr<InferenceBackend> farBackend_;   // 비어 있으면 backend_ 를 같이 씀
     float nmsThreshold_;
 };

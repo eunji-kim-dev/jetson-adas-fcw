@@ -107,6 +107,9 @@ int main(int argc, char* argv[]) {
     runMetadata.model = modelPath;
     runMetadata.modelHash = RunLogger::hashFile(modelPath);
     runMetadata.fullCropStrategy = "full+crop_every_frame";
+    // perception_demo 는 crop 전용 모델 옵션을 안 씀. 기본값을 그대로 기록
+    runMetadata.cropModel = "same_as_model";
+    runMetadata.cropInput = "640x640";
     runMetadata.detectionInterval = 1;
     runMetadata.confidenceThreshold = detectorThreshold;
     runMetadata.nmsThreshold = nmsThreshold;

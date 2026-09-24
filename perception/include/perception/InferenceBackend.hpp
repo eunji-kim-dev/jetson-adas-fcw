@@ -40,10 +40,15 @@ public:
  *   "opencv_dnn" : OpenCV DNN (CPU)
  * 알 수 없는 이름이면 std::invalid_argument,
  * 모델 로드 실패는 구현체의 예외(cv::Exception 등)를 그대로 전달한다.
+ *
+ * inputSize 는 모델의 입력 크기(가로 x 세로). 기본 640x640.
+ *   - OpenCV DNN : 이 크기로 letterbox 와 blob 을 만듦 (ONNX 입력과 맞아야 함)
+ *   - TensorRT   : 엔진에서 읽은 입력 크기와 다르면 예외 (엔진 캐시 오류 방지)
  */
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
     const std::string& modelPath,
     float confidenceThreshold,
-    float nmsThreshold
+    float nmsThreshold,
+    const cv::Size& inputSize = cv::Size(640, 640)
 );

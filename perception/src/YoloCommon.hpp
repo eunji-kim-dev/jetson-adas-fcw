@@ -20,8 +20,9 @@ struct LetterboxResult {
     int padY;
 };
 
-// 입력 크기(정사각형)에 맞춰 비율을 유지한 채 축소하고 회색(114)으로 패딩함
-LetterboxResult letterbox(const cv::Mat& frame, int inputSize);
+// 모델 입력 크기(가로 x 세로)에 맞춰 비율을 유지한 채 축소하고 회색(114)으로 패딩함
+// 정사각형(640x640)이면 예전과 계산이 완전히 같음. 288x640 처럼 직사각형도 받음
+LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize);
 
 /*
  * YOLOv8 출력 텐서를 Detection 목록으로 바꿈

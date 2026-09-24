@@ -19,6 +19,9 @@
  *   --lane-roi <8개 정수>       영상별 ego lane ROI 를 원본 픽셀 좌표로 지정 (TL,TR,BR,BL 순서, 콤마 구분)
  *                              예: --lane-roi 854,520,941,520,1257,925,198,925
  *                              생략하면 기존 화면 비율 ROI 를 그대로 씀 (golden 보존)
+ *   --crop-model <경로>         원거리 crop 추론에 쓸 ONNX (예: models/yolov8n_288x640.onnx)
+ *   --crop-input <H>x<W>       그 모델의 입력 크기. 세로x가로 순서 (예: 288x640). --crop-model 과 같이 줘야 함
+ *                              둘 다 생략하면 crop 도 전체 프레임과 같은 640x640 모델로 추론함 (golden 보존)
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -30,13 +33,17 @@ struct RunOptions {
     double deadlineMs = 0.0;   // 0 이면 영상 fps 기준
     bool writeVideo = true;
     std::vector<int> laneRoiPx;   // 비어 있으면 기본 비율 ROI, 아니면 8개 (x1,y1,...,x4,y4)
+    std::string cropModelPath;    // 비어 있으면 crop 도 전체 프레임 모델을 씀
+    int cropInputHeight = 0;      // --crop-input 의 H. 0 이면 미지정
+    int cropInputWidth = 0;       // --crop-input 의 W. 0 이면 미지정
 };
 
 inline void printUsage(const std::string& programName) {
     std::cerr << "사용법: " << programName
               << " [입력 영상 경로] [--backend NAME] [--run-id ID] [--power-mode MODE]"
               << " [--warmup-frames N] [--measured-frames N]"
-              << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]\n";
+              << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
+              << " [--crop-model PATH --crop-input HxW]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -120,6 +127,28 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 return false;
             }
             options.laneRoiPx = values;
+        } else if (argument == "--crop-model") {
+            if (!takeValue(i, argument, options.cropModelPath)) return false;
+        } else if (argument == "--crop-input") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            // "288x640" 처럼 세로x가로. YOLO imgsz 와 ONNX 파일 이름 순서에 맞춤
+            const std::size_t split = text.find('x');
+            if (split == std::string::npos) {
+                std::cerr << "[ERROR] --crop-input 은 HxW 형식이어야 함 (예: 288x640): " << text << '\n';
+                return false;
+            }
+            try {
+                options.cropInputHeight = std::stoi(text.substr(0, split));
+                options.cropInputWidth = std::stoi(text.substr(split + 1));
+            } catch (const std::exception&) {
+                std::cerr << "[ERROR] --crop-input 값이 정수가 아님: " << text << '\n';
+                return false;
+            }
+            if (options.cropInputHeight <= 0 || options.cropInputWidth <= 0) {
+                std::cerr << "[ERROR] --crop-input 값은 0 보다 커야 함: " << text << '\n';
+                return false;
+            }
         } else if (argument.rfind("--", 0) == 0) {
             std::cerr << "[ERROR] 알 수 없는 옵션: " << argument << '\n';
             printUsage(programName);
@@ -127,6 +156,15 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         } else {
             options.inputPath = argument;
         }
+    }
+
+    // --crop-model 과 --crop-input 은 짝으로만 씀. 하나만 있으면 어떤 크기로 돌릴지 알 수 없음
+    const bool hasCropModel = !options.cropModelPath.empty();
+    const bool hasCropInput = options.cropInputHeight > 0 && options.cropInputWidth > 0;
+    if (hasCropModel != hasCropInput) {
+        std::cerr << "[ERROR] --crop-model 과 --crop-input 은 같이 줘야 함\n";
+        printUsage(programName);
+        return false;
     }
     return true;
 }

@@ -118,8 +118,8 @@ std::vector<Detection> suppressContainedDuplicates(const std::vector<Detection>&
 
 } // namespace
 
-YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold)
-    : backend_(std::move(backend)), nmsThreshold_(nmsThreshold) {}
+YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend)
+    : backend_(std::move(backend)), farBackend_(std::move(farBackend)), nmsThreshold_(nmsThreshold) {}
 
 std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTiming* timing) {
     // 기본 YOLO 검출
@@ -187,7 +187,9 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
     const cv::Mat crop = frame(cropRect).clone();
 
-    std::vector<Detection> cropDetections = backend_->infer(crop, timing);
+    // crop 전용 백엔드가 있으면 그걸 씀. 없으면 전체 프레임 백엔드를 그대로 씀
+    InferenceBackend& cropBackend = farBackend_ != nullptr ? *farBackend_ : *backend_;
+    std::vector<Detection> cropDetections = cropBackend.infer(crop, timing);
     std::vector<Detection> result;
 
     for (Detection detection : cropDetections) {

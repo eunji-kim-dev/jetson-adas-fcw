@@ -155,7 +155,7 @@ struct TensorRTBackend::Impl {
     nvinfer1::Dims outputDims{};
     std::size_t inputBytes = 0;
     std::size_t outputBytes = 0;
-    int inputSize = 0;   // 정사각형 입력 한 변 (640)
+    cv::Size inputSize;  // 모델 입력 크기(가로 x 세로). 640x640 또는 288x640 등
 
     // 호스트는 pinned, 디바이스는 cudaMalloc
     float* hostInput = nullptr;
@@ -179,7 +179,7 @@ struct TensorRTBackend::Impl {
 // 생성자: 엔진 준비 → I/O 텐서 조사 → 버퍼 할당 → 주소 바인딩
 // ------------------------------------------------------------
 
-TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold)
+TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold, const cv::Size& expectedInputSize)
     : impl_(std::make_unique<Impl>()), confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
     using namespace nvinfer1;
 
@@ -247,12 +247,19 @@ TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string
         throw std::runtime_error("입력 또는 출력 텐서를 못 찾음");
     }
 
-    // 입력은 [1, 3, H, W] 정사각형이어야 letterbox 를 그대로 쓸 수 있음
+    // 입력은 [1, 3, H, W]. 정사각형이 아니어도 됨 (Crop 용 288x640)
     const Dims& in = impl_->inputDims;
-    if (in.nbDims != 4 || in.d[0] != 1 || in.d[1] != 3 || in.d[2] != in.d[3]) {
-        throw std::runtime_error("지원하지 않는 입력 형태 " + dimsToString(in) + " (기대: [1, 3, N, N])");
+    if (in.nbDims != 4 || in.d[0] != 1 || in.d[1] != 3) {
+        throw std::runtime_error("지원하지 않는 입력 형태 " + dimsToString(in) + " (기대: [1, 3, H, W])");
     }
-    impl_->inputSize = static_cast<int>(in.d[2]);
+    impl_->inputSize = cv::Size(static_cast<int>(in.d[3]), static_cast<int>(in.d[2]));
+
+    // 호출자가 기대한 크기와 엔진 크기가 다르면 멈춤
+    // (예: 288x640 ONNX 를 줬는데 640x640 엔진 캐시를 읽어 버린 경우)
+    if (impl_->inputSize != expectedInputSize) {
+        throw std::runtime_error("엔진 입력 크기 " + std::to_string(impl_->inputSize.height) + "x" + std::to_string(impl_->inputSize.width)
+            + " 가 기대한 크기 " + std::to_string(expectedInputSize.height) + "x" + std::to_string(expectedInputSize.width) + " 와 다름 (HxW): " + enginePath_);
+    }
 
     // 출력은 [1, 84, 8400] 처럼 3차원
     if (impl_->outputDims.nbDims != 3 || impl_->outputDims.d[0] != 1) {
@@ -298,8 +305,8 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
     // 전처리
     const auto preprocessStart = std::chrono::steady_clock::now();
     const LetterboxResult prepared = letterbox(image, t.inputSize);
-    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, cv::Size(t.inputSize, t.inputSize), cv::Scalar(), true, false);
-
+    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, t.inputSize, cv::Scalar(), true, false);
+    
     if (!blob.isContinuous() || blob.total() * sizeof(float) != t.inputBytes) {
         throw std::runtime_error("blob 크기가 엔진 입력과 다름");
     }

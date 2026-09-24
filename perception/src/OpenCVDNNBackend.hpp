@@ -16,7 +16,8 @@
  */
 class OpenCVDNNBackend : public InferenceBackend {
 public:
-    OpenCVDNNBackend(const std::string& modelPath, float confidenceThreshold, float nmsThreshold);
+    // inputSize 는 ONNX 의 입력 크기(가로 x 세로). 모델과 다르면 forward 가 실패함
+    OpenCVDNNBackend(const std::string& modelPath, float confidenceThreshold, float nmsThreshold, const cv::Size& inputSize);
 
     std::vector<Detection> infer(const cv::Mat& image, InferenceTiming* timing) override;
 
@@ -24,4 +25,5 @@ private:
     cv::dnn::Net net_;
     float confidenceThreshold_;
     float nmsThreshold_;
+    cv::Size inputSize_;
 };

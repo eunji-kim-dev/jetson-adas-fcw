@@ -6,20 +6,18 @@
 #include <stdexcept>
 #include <vector>
 
-OpenCVDNNBackend::OpenCVDNNBackend(const std::string& modelPath, float confidenceThreshold, float nmsThreshold)
-    : confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
+OpenCVDNNBackend::OpenCVDNNBackend(const std::string& modelPath, float confidenceThreshold, float nmsThreshold, const cv::Size& inputSize)
+    : confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold), inputSize_(inputSize) {
     net_ = cv::dnn::readNetFromONNX(modelPath);
     net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
     net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
 }
 
 std::vector<Detection> OpenCVDNNBackend::infer(const cv::Mat& image, InferenceTiming* timing) {
-    constexpr int inputSize = 640;
-
-    // 전처리: letterbox + NCHW blob
+    // 전처리: letterbox + NCHW blob. 입력 크기는 생성자에서 받은 값(기본 640x640)
     const auto preprocessStart = std::chrono::steady_clock::now();
-    const LetterboxResult prepared = letterbox(image, inputSize);
-    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, cv::Size(inputSize, inputSize), cv::Scalar(), true, false);
+    const LetterboxResult prepared = letterbox(image, inputSize_);
+    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, inputSize_, cv::Scalar(), true, false);
     const auto preprocessEnd = std::chrono::steady_clock::now();
 
     // 추론: 입력 바인딩 + forward

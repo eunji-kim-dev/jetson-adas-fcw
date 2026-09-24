@@ -281,6 +281,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "[ERROR] YOLO 모델 없음: " << modelPath << '\n';
         return 1;
     }
+    if (!options.cropModelPath.empty() && !std::filesystem::exists(options.cropModelPath)) {
+        std::cerr << "[ERROR] crop 모델 없음: " << options.cropModelPath << '\n';
+        return 1;
+    }
 
     KoreanTextRenderer koreanText;
     if (!koreanText.initialize()) {
@@ -293,16 +297,27 @@ int main(int argc, char* argv[]) {
     constexpr float nmsThreshold = 0.45F;
 
     // 추론 엔진은 --backend로 선택하고, YoloDetector는 backend 종류를 알지 못함
+    // --crop-model 이 있으면 원거리 crop 추론용 백엔드를 하나 더 만듦 (같은 backend 종류, 다른 모델·입력 크기)
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold);
-        detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold);
+        std::unique_ptr<InferenceBackend> cropBackend;
+        if (!options.cropModelPath.empty()) {
+            const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
+            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize);
+        }
+        detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend));
     } catch (const std::exception& error) {
         std::cerr << "[ERROR] 추론 backend 생성 실패 (backend=" << backendName << ")\n" << error.what() << '\n';
         return 1;
     }
     YoloDetector& detector = *detectorPtr;
     std::cout << "[INFO] 추론 backend: " << backendName << '\n';
+    if (options.cropModelPath.empty()) {
+        std::cout << "[INFO] crop 추론: 전체 프레임과 같은 모델 (640x640)\n";
+    } else {
+        std::cout << "[INFO] crop 추론: " << options.cropModelPath << " (" << options.cropInputHeight << "x" << options.cropInputWidth << ")\n";
+    }
 
     // 영상 입력은 FrameSource 인터페이스 뒤에 둔다
     // 실시간 카메라(CameraSource)로 바꿀 때 이 생성부만 교체하면 됨
@@ -419,6 +434,14 @@ int main(int argc, char* argv[]) {
     runMetadata.model = modelPath;
     runMetadata.modelHash = RunLogger::hashFile(modelPath);
     runMetadata.fullCropStrategy = "full+crop_every_frame";
+    // 어느 crop 모델·입력 크기로 돌렸는지 run_summary 에 남김 (9/28 구조 비교용)
+    if (options.cropModelPath.empty()) {
+        runMetadata.cropModel = "same_as_model";
+        runMetadata.cropInput = "640x640";
+    } else {
+        runMetadata.cropModel = options.cropModelPath;
+        runMetadata.cropInput = std::to_string(options.cropInputHeight) + "x" + std::to_string(options.cropInputWidth);
+    }
     // 영상별 ROI 가 달라지므로 어느 ROI 로 나온 결과인지 run_summary 에 남김
     if (options.laneRoiPx.empty()) {
         runMetadata.laneRoi = "default";

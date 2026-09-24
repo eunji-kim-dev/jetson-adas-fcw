@@ -24,7 +24,7 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMAS = {1, 2, 3}
+SUPPORTED_SCHEMAS = {1, 2, 3, 4}   # v4: crop_model, crop_input 추가 (읽기에는 영향 없음)
 
 
 # ---------- 유틸 ----------

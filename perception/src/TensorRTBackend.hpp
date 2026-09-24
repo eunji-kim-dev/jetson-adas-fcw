@@ -27,7 +27,9 @@
  */
 class TensorRTBackend : public InferenceBackend {
 public:
-    TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold);
+    // expectedInputSize 는 호출자가 기대하는 입력 크기(가로 x 세로).
+    // 엔진에서 읽은 크기와 다르면 예외. 엔진 캐시가 다른 모델 것일 때 조용히 틀리는 걸 막음
+    TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold, const cv::Size& expectedInputSize);
     ~TensorRTBackend() override;
 
     TensorRTBackend(const TensorRTBackend&) = delete;

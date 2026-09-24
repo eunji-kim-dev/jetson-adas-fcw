@@ -7,16 +7,18 @@
 #include <algorithm>
 #include <cmath>
 
-LetterboxResult letterbox(const cv::Mat& frame, int inputSize) {
-    const float scale = std::min(static_cast<float>(inputSize) / static_cast<float>(frame.cols), static_cast<float>(inputSize) / static_cast<float>(frame.rows));
+LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize) {
+    // 가로·세로 축소 비율 중 작은 쪽을 씀. 입력이 정사각형이면 예전 계산과 같음
+    const float scale = std::min(static_cast<float>(inputSize.width) / static_cast<float>(frame.cols), static_cast<float>(inputSize.height) / static_cast<float>(frame.rows));
     const int resizedWidth = static_cast<int>(std::round(static_cast<float>(frame.cols) * scale));
     const int resizedHeight = static_cast<int>(std::round(static_cast<float>(frame.rows) * scale));
 
     cv::Mat resized;
     cv::resize(frame, resized, cv::Size(resizedWidth, resizedHeight));
 
-    const int totalPadX = inputSize - resizedWidth;
-    const int totalPadY = inputSize - resizedHeight;
+    // 여백은 가로·세로 따로 계산함 (직사각형 입력 대응)
+    const int totalPadX = inputSize.width - resizedWidth;
+    const int totalPadY = inputSize.height - resizedHeight;
     const int padLeft = totalPadX / 2;
     const int padRight = totalPadX - padLeft;
     const int padTop = totalPadY / 2;
