@@ -93,7 +93,7 @@ usage() {
     echo "  예:   bash scripts/benchmark_harness.sh baseline_x86" >&2
     echo "  예:   bash scripts/benchmark_harness.sh baseline_jetson_cpu --clocks on --video off" >&2
     echo "  예:   bash scripts/benchmark_harness.sh trt_fp16_jetson --backend tensorrt_fp16 --clocks on --video off" >&2
-    echo "  crop 전용 모델: --crop-model models/yolov8n_288x640.onnx --crop-input 288x640 (둘 다 있어야 함, golden 비교는 건너뜀)" >&2
+    echo "  crop 전용 모델: --crop-model models/yolov8n_288x640.onnx --crop-input 288x640 (둘 다 있어야 함, golden 은 crop 구조별로 따로 둠)" >&2
     exit 2
 }
 
@@ -191,7 +191,7 @@ readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT
 
 
 # ------------------------------------------------------------
-# Golden 기준 — (아키텍처, 백엔드) 쌍마다 따로 둠
+# Golden 기준 — (아키텍처, 백엔드, crop 구조) 조합마다 따로 둠
 # ------------------------------------------------------------
 # - x86 과 ARM 은 부동소수점 연산 순서가 달라 YOLO 점수가 소수점 아래에서 갈림
 # - OpenCV DNN 과 TensorRT 는 커널이 달라 같은 장비에서도 점수가 갈림 (FP16 은 더 갈림)
@@ -202,12 +202,24 @@ readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT
 ARCH="$(uname -m)"
 readonly ARCH
 
+# crop 전용 모델을 쓰면 구조가 달라져 golden 도 따로 둠. 키 뒤에 /crop<HxW> 를 붙여 구분함
+CROP_KEY=""
+if [[ -n "${CROP_MODEL}" ]]; then
+    CROP_KEY="/crop${CROP_INPUT}"
+fi
+GOLDEN_KEY="${ARCH}/${BACKEND}${CROP_KEY}"
+readonly CROP_KEY GOLDEN_KEY
+
 GOLDEN_REL=""
 GOLDEN_MD5=""
-case "${ARCH}/${BACKEND}" in
+case "${GOLDEN_KEY}" in
     x86_64/opencv_dnn)
         GOLDEN_REL="results/golden_baseline.csv"
         GOLDEN_MD5="a0006c4a16dbe3f69c178fbc5c1b6b8e"
+        ;;
+    x86_64/opencv_dnn/crop288x640)
+        GOLDEN_REL="results/golden_baseline_crop288x640.csv"
+        GOLDEN_MD5="87453f9c093da20c1da7df8d20e0c2e0"
         ;;
     aarch64/opencv_dnn)
         GOLDEN_REL="results/golden_baseline_aarch64.csv"
@@ -221,14 +233,12 @@ case "${ARCH}/${BACKEND}" in
         GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16.csv"
         GOLDEN_MD5="e3f698927fa40dfcc17c39668f6fe5d8"
         ;;
+    aarch64/tensorrt_fp16/crop288x640)
+        GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16_crop288x640.csv"
+        GOLDEN_MD5="4681f432c6e830d5326affb284bb7227"
+        ;;
 esac
-
-# crop 전용 모델은 구조가 달라 golden 과 같을 수 없음. MD5 비교를 건너뛰고 회차별 MD5 만 찍음
-# (같은 구조 안에서 5회가 전부 같은지는 그 MD5 로 확인)
-if [[ -n "${CROP_MODEL}" ]]; then
-    GOLDEN_REL=""
-    GOLDEN_MD5=""
-fi
+# 위 표에 없는 조합(INT8 등)은 예전처럼 비교를 건너뛰고 회차별 MD5 만 찍음
 readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
@@ -713,7 +723,7 @@ case "${VIDEO_MODE}" in
 esac
 echo
 
-echo "Golden 기준 (${ARCH} / ${BACKEND})"
+echo "Golden 기준 (${GOLDEN_KEY})"
 if [[ -z "${GOLDEN_MD5}" ]]; then
     warn "이 조합의 golden 이 아직 없음 — MD5 비교를 건너뜀"
     warn "5회 MD5 가 전부 같으면 그 값을 하네스에 golden 으로 고정할 것"
@@ -1270,7 +1280,7 @@ input_md5="$(md5sum "${INPUT_REL}" | awk '{print $1}')"
 
     echo "----- 입력 무결성 -----"
     printf 'arch              : %s\n' "${ARCH}"
-    printf 'golden_md5        : %s\n' "${GOLDEN_MD5:-(없음 — ${ARCH}/${BACKEND} 조합 미정)}"
+    printf 'golden_md5        : %s\n' "${GOLDEN_MD5:-(없음 — ${GOLDEN_KEY} 조합 미정)}"
     printf 'model_md5         : %s\n' "${model_md5}"
     printf 'input_md5         : %s\n' "${input_md5}"
     echo
