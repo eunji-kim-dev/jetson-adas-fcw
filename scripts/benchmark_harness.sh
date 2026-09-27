@@ -237,8 +237,16 @@ case "${GOLDEN_KEY}" in
         GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp16_crop288x640.csv"
         GOLDEN_MD5="4681f432c6e830d5326affb284bb7227"
         ;;
+    aarch64/tensorrt_fp32/crop288x640)
+        GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_fp32_crop288x640.csv"
+        GOLDEN_MD5="33cd6fbf8918d90d157ac34dcdb933e9"
+        ;;
+    aarch64/tensorrt_int8/crop288x640)
+        GOLDEN_REL="results/golden_baseline_aarch64_tensorrt_int8_crop288x640.csv"
+        GOLDEN_MD5="8601b4689428fc1cb8d89d0d4aea1b2e"
+        ;;
 esac
-# 위 표에 없는 조합(INT8 등)은 예전처럼 비교를 건너뛰고 회차별 MD5 만 찍음
+# 위 표에 없는 조합은 예전처럼 비교를 건너뛰고 회차별 MD5 만 찍음
 readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
