@@ -36,6 +36,21 @@ public:
 };
 
 /*
+ * tensorrt_int8 실험용 설정. 정식 엔진(variant 비움)은 이 값들이 전부 기본이라 결과가 안 바뀜
+ *   - variant     : 비어 있으면 <모델>.int8.engine / .calib. 아니면 <모델>.int8-<variant>.engine / .calib 로 파일을 분리함
+ *                   → 실험 엔진이 정식 엔진·golden 을 덮어쓰지 않음
+ *   - calibrator  : "entropy" (IInt8EntropyCalibrator2, 기본) | "minmax" (IInt8MinMaxCalibrator)
+ *   - shuffleSeed : 0 이상이면 calibration 이미지 순서를 이 시드로 섞음 (-1 = 목록 순서 그대로)
+ *   - fp32Head    : true 면 검출 헤드(/model.22/) 층을 전부 FP32 로 강제함 (kOBEY_PRECISION_CONSTRAINTS)
+ */
+struct Int8Tuning {
+    std::string variant;
+    std::string calibrator = "entropy";
+    int shuffleSeed = -1;
+    bool fp32Head = false;
+};
+
+/*
  * backendName으로 추론 백엔드를 생성한다.
  *   "opencv_dnn" : OpenCV DNN (CPU)
  * 알 수 없는 이름이면 std::invalid_argument,
@@ -48,6 +63,7 @@ public:
  * calibrationList 는 tensorrt_int8 전용. Calibration 이미지 경로 목록 파일(한 줄에 하나).
  *   INT8 엔진을 처음 만들 때만 필요하고, 엔진이나 calibration 캐시가 이미 있으면 비워도 됨.
  *   다른 백엔드는 무시함.
+ * int8Tuning 도 tensorrt_int8 전용 (위 Int8Tuning). 기본값이면 정식 엔진과 같음.
  */
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
@@ -55,5 +71,6 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     float confidenceThreshold,
     float nmsThreshold,
     const cv::Size& inputSize = cv::Size(640, 640),
-    const std::string& calibrationList = ""
+    const std::string& calibrationList = "",
+    const Int8Tuning& int8Tuning = Int8Tuning()
 );

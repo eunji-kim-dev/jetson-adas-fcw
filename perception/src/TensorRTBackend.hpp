@@ -36,8 +36,9 @@ public:
     // expectedInputSize 는 호출자가 기대하는 입력 크기(가로 x 세로).
     // 엔진에서 읽은 크기와 다르면 예외. 엔진 캐시가 다른 모델 것일 때 조용히 틀리는 걸 막음
     // calibrationList 는 int8 에서 엔진을 새로 만들 때 쓰는 이미지 목록 파일. 그 외에는 무시함
+    // int8Tuning 은 int8 실험용 (InferenceBackend.hpp 의 Int8Tuning). 기본값이면 정식 엔진과 같음
     TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
-                    const cv::Size& expectedInputSize, const std::string& calibrationList = "");
+                    const cv::Size& expectedInputSize, const std::string& calibrationList = "", const Int8Tuning& int8Tuning = Int8Tuning());
     ~TensorRTBackend() override;
 
     TensorRTBackend(const TensorRTBackend&) = delete;

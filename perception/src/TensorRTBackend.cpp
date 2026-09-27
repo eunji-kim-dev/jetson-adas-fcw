@@ -8,6 +8,7 @@
 
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -62,16 +64,19 @@ std::string dimsToString(const nvinfer1::Dims& dims) {
 }
 
 // <모델>.onnx → <모델>.<정밀도>.engine
-std::string engineFileFor(const std::string& modelPath, const std::string& precision) {
+// int8 실험 variant 가 있으면 <모델>.int8-<variant>.engine (정식 엔진과 파일이 갈림)
+std::string engineFileFor(const std::string& modelPath, const std::string& precision, const std::string& variant) {
     std::filesystem::path p(modelPath);
-    p.replace_extension("." + precision + ".engine");
+    const std::string tag = (precision == "int8" && !variant.empty()) ? "-" + variant : "";
+    p.replace_extension("." + precision + tag + ".engine");
     return p.string();
 }
 
-// <모델>.onnx → <모델>.int8.calib (calibration 캐시)
-std::string calibrationCacheFileFor(const std::string& modelPath) {
+// <모델>.onnx → <모델>.int8.calib (calibration 캐시). variant 가 있으면 <모델>.int8-<variant>.calib
+std::string calibrationCacheFileFor(const std::string& modelPath, const std::string& variant) {
     std::filesystem::path p(modelPath);
-    p.replace_extension(".int8.calib");
+    const std::string tag = variant.empty() ? "" : "-" + variant;
+    p.replace_extension(".int8" + tag + ".calib");
     return p.string();
 }
 
@@ -113,9 +118,14 @@ bool engineIsStale(const std::string& modelPath, const std::string& enginePath) 
 //
 // IInt8EntropyCalibrator2 와 kINT8 플래그는 TensorRT 10.1 부터 deprecated (Q/DQ explicit quantization 권고)
 // 지만 아직 동작함. 같은 FP32 ONNX 로 FP32/FP16/INT8 을 비교하는 게 목적이라 이 방식이 맞음.
+//
+// Base 는 nvinfer1::IInt8EntropyCalibrator2 (기본) 또는 nvinfer1::IInt8MinMaxCalibrator.
+// Entropy 는 정보 손실이 적은 범위를 골라 극단값을 잘라낼 수 있고, MinMax 는 관측된 전체 범위를 씀.
+// 어느 쪽이 맞는지는 모델마다 달라 실험으로 정함 (Int8Tuning::calibrator)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-class Int8Calibrator : public nvinfer1::IInt8EntropyCalibrator2 {
+template <class Base>
+class Int8Calibrator : public Base {
 public:
     Int8Calibrator(std::vector<std::string> imagePaths, std::string cachePath, const cv::Size& inputSize, std::size_t inputBytes)
         : imagePaths_(std::move(imagePaths)), cachePath_(std::move(cachePath)), inputSize_(inputSize), inputBytes_(inputBytes) {
@@ -199,7 +209,8 @@ private:
 // ONNX → 직렬화된 엔진
 // ------------------------------------------------------------
 
-std::vector<char> buildEngine(const std::string& modelPath, const std::string& precision, const std::string& calibrationList, nvinfer1::ILogger& logger) {
+std::vector<char> buildEngine(const std::string& modelPath, const std::string& precision, const std::string& calibrationList,
+                              const Int8Tuning& tuning, nvinfer1::ILogger& logger) {
     using namespace nvinfer1;
 
     std::unique_ptr<IBuilder> builder(createInferBuilder(logger));
@@ -227,7 +238,9 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
     config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 256ULL << 20);
 
     // calibrator 는 buildSerializedNetwork 가 끝날 때까지 살아 있어야 해서 이 함수 범위에 둠
-    std::unique_ptr<Int8Calibrator> calibrator;
+    // Entropy / MinMax 두 종류라 공통 부모(IInt8Calibrator)로 들고, 쓴 장수는 각각의 usedCount() 로 읽음
+    std::unique_ptr<Int8Calibrator<IInt8EntropyCalibrator2>> entropyCalibrator;
+    std::unique_ptr<Int8Calibrator<IInt8MinMaxCalibrator>> minMaxCalibrator;
 
     if (precision == "fp16") {
         // kFP16 은 TensorRT 10.12 부터 deprecated (강타입 네트워크로 대체 권고) 지만 아직 동작함.
@@ -247,16 +260,22 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
         const cv::Size inputSize(static_cast<int>(in.d[3]), static_cast<int>(in.d[2]));
         const std::size_t inputBytes = volume(in) * sizeof(float);
 
-        const std::string cachePath = calibrationCacheFileFor(modelPath);
-        const std::vector<std::string> images = readCalibrationList(calibrationList);
+        const std::string cachePath = calibrationCacheFileFor(modelPath, tuning.variant);
+        std::vector<std::string> images = readCalibrationList(calibrationList);
+        // 실험용: 이미지 순서 섞기. 목록은 영상별로 묶여 있어 배치 1 calibration 에서 순서 영향이 있을 수 있음
+        if (tuning.shuffleSeed >= 0) {
+            std::mt19937 rng(static_cast<unsigned>(tuning.shuffleSeed));
+            std::shuffle(images.begin(), images.end(), rng);
+        }
         if (images.empty() && !std::filesystem::exists(cachePath)) {
             throw std::runtime_error(
                 "int8 엔진을 만들려면 calibration 이미지 목록(--calib-list / --crop-calib-list)이나 캐시 파일이 필요함: " + cachePath);
         }
         std::cerr << "[TensorRT] int8 calibration: 이미지 " << images.size() << " 장, 캐시 " << cachePath
-                  << (std::filesystem::exists(cachePath) ? " (있음, 이미지 대신 캐시 사용)" : " (없음, 새로 계산)") << '\n';
-
-        calibrator = std::make_unique<Int8Calibrator>(images, cachePath, inputSize, inputBytes);
+                  << (std::filesystem::exists(cachePath) ? " (있음, 이미지 대신 캐시 사용)" : " (없음, 새로 계산)")
+                  << ", calibrator " << tuning.calibrator
+                  << (tuning.shuffleSeed >= 0 ? ", 순서 섞음 seed " + std::to_string(tuning.shuffleSeed) : "")
+                  << (tuning.fp32Head ? ", 헤드 FP32 강제" : "") << '\n';
 
         // kINT8 / setInt8Calibrator 도 10.1 부터 deprecated 지만 동작함 (위 kFP16 과 같은 이유로 이 방식을 씀)
         // INT8 로 못 만드는 층은 FP16 으로 떨어지게 kFP16 도 같이 켬
@@ -264,8 +283,38 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         config->setFlag(BuilderFlag::kINT8);
         config->setFlag(BuilderFlag::kFP16);
-        config->setInt8Calibrator(calibrator.get());
+        if (tuning.calibrator == "minmax") {
+            minMaxCalibrator = std::make_unique<Int8Calibrator<IInt8MinMaxCalibrator>>(images, cachePath, inputSize, inputBytes);
+            config->setInt8Calibrator(minMaxCalibrator.get());
+        } else if (tuning.calibrator == "entropy") {
+            entropyCalibrator = std::make_unique<Int8Calibrator<IInt8EntropyCalibrator2>>(images, cachePath, inputSize, inputBytes);
+            config->setInt8Calibrator(entropyCalibrator.get());
+        } else {
+            throw std::runtime_error("모르는 int8 calibrator: " + tuning.calibrator + " (entropy | minmax)");
+        }
 #pragma GCC diagnostic pop
+
+        // 실험용: 검출 헤드(/model.22/) 층을 FP32 로 강제함
+        // 신뢰도 점수(Sigmoid)와 박스(DFL) 가 나오는 곳이라, 여기가 INT8 잡음에 민감한지 보는 용도
+        // kOBEY_PRECISION_CONSTRAINTS 가 없으면 TensorRT 가 setPrecision 을 무시할 수 있음
+        if (tuning.fp32Head) {
+            // setPrecision / setOutputType / kOBEY_PRECISION_CONSTRAINTS 는 10.x 에서 deprecated (강타입 네트워크 권고) 지만 동작함
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+            int forced = 0;
+            for (int i = 0; i < network->getNbLayers(); ++i) {
+                ILayer* layer = network->getLayer(i);
+                const std::string name = layer->getName() ? layer->getName() : "";
+                if (name.find("/model.22/") == std::string::npos) continue;
+                layer->setPrecision(DataType::kFLOAT);
+                for (int j = 0; j < layer->getNbOutputs(); ++j) layer->setOutputType(j, DataType::kFLOAT);
+                ++forced;
+            }
+            config->setFlag(BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+#pragma GCC diagnostic pop
+            std::cerr << "[TensorRT] 헤드 FP32 강제: " << forced << " 층\n";
+            if (forced == 0) throw std::runtime_error("/model.22/ 이름을 가진 층이 없음 — ONNX 층 이름을 확인할 것");
+        }
     } else if (precision != "fp32") {
         throw std::runtime_error("모르는 정밀도: " + precision + " (fp32 | fp16 | int8)");
     }
@@ -273,8 +322,9 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
     std::unique_ptr<IHostMemory> serialized(builder->buildSerializedNetwork(*network, *config));
     if (!serialized) throw std::runtime_error("TensorRT 엔진 빌드 실패");
 
-    if (calibrator && calibrator->usedCount() > 0) {
-        std::cerr << "[TensorRT] int8 calibration 에 쓴 이미지: " << calibrator->usedCount() << " 장\n";
+    const std::size_t usedImages = entropyCalibrator ? entropyCalibrator->usedCount() : minMaxCalibrator ? minMaxCalibrator->usedCount() : 0;
+    if (usedImages > 0) {
+        std::cerr << "[TensorRT] int8 calibration 에 쓴 이미지: " << usedImages << " 장\n";
     }
 
     const char* begin = static_cast<const char*>(serialized->data());
@@ -328,11 +378,11 @@ struct TensorRTBackend::Impl {
 // ------------------------------------------------------------
 
 TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
-                                 const cv::Size& expectedInputSize, const std::string& calibrationList)
+                                 const cv::Size& expectedInputSize, const std::string& calibrationList, const Int8Tuning& int8Tuning)
     : impl_(std::make_unique<Impl>()), confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
     using namespace nvinfer1;
 
-    enginePath_ = engineFileFor(modelPath, precision);
+    enginePath_ = engineFileFor(modelPath, precision, int8Tuning.variant);
 
     // 1) 엔진 읽기. 오래됐거나 없거나 못 읽으면 빌드
     std::vector<char> blob;
@@ -353,7 +403,7 @@ TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string
     if (!impl_->engine) {
         std::cerr << "[TensorRT] 엔진 빌드 시작 (" << precision << "): " << modelPath << " — Jetson 에서 수 분 걸림\n";
         const auto buildStart = std::chrono::steady_clock::now();
-        blob = buildEngine(modelPath, precision, calibrationList, impl_->logger);
+        blob = buildEngine(modelPath, precision, calibrationList, int8Tuning, impl_->logger);
         const double buildSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count();
 
         std::ofstream out(enginePath_, std::ios::binary);

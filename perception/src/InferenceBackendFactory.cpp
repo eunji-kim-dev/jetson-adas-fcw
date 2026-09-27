@@ -22,7 +22,8 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     float confidenceThreshold,
     float nmsThreshold,
     const cv::Size& inputSize,
-    const std::string& calibrationList
+    const std::string& calibrationList,
+    const Int8Tuning& int8Tuning
 ) {
     if (backendName == "opencv_dnn") {
         return std::make_unique<OpenCVDNNBackend>(modelPath, confidenceThreshold, nmsThreshold, inputSize);
@@ -33,7 +34,7 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     if (backendName.rfind(prefix, 0) == 0) {
         const std::string precision = backendName.substr(prefix.size());
 #ifdef PERCEPTION_HAS_TENSORRT
-        return std::make_unique<TensorRTBackend>(modelPath, precision, confidenceThreshold, nmsThreshold, inputSize, calibrationList);
+        return std::make_unique<TensorRTBackend>(modelPath, precision, confidenceThreshold, nmsThreshold, inputSize, calibrationList, int8Tuning);
 #else
         throw std::invalid_argument("이 빌드에는 TensorRT 가 없음 (-DENABLE_TENSORRT=ON 으로 다시 빌드): " + backendName);
 #endif

@@ -302,14 +302,24 @@ int main(int argc, char* argv[]) {
 
     // 추론 엔진은 --backend로 선택하고, YoloDetector는 backend 종류를 알지 못함
     // --crop-model 이 있으면 원거리 crop 추론용 백엔드를 하나 더 만듦 (같은 backend 종류, 다른 모델·입력 크기)
+    // int8 실험 설정 (정식 엔진이면 전부 기본값). Full·Crop 두 엔진에 같은 설정을 씀
+    Int8Tuning int8Tuning;
+    int8Tuning.variant = options.int8Variant;
+    int8Tuning.calibrator = options.int8Calibrator;
+    int8Tuning.shuffleSeed = options.int8ShuffleSeed;
+    int8Tuning.fp32Head = options.int8Fp32Head;
+    if (!options.int8Variant.empty()) {
+        std::cout << "[INFO] int8 실험: variant=" << options.int8Variant << " calibrator=" << options.int8Calibrator
+                  << " shuffle_seed=" << options.int8ShuffleSeed << " fp32_head=" << (options.int8Fp32Head ? 1 : 0) << '\n';
+    }
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
-        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList);
+        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList, int8Tuning);
         std::unique_ptr<InferenceBackend> cropBackend;
         if (!options.cropModelPath.empty()) {
             const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
-            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList);
+            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning);
         }
         detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend));
     } catch (const std::exception& error) {

@@ -6,6 +6,9 @@
 #   crop 전용 모델로 돌리려면 환경변수 두 개를 같이 줌 (둘 다 있어야 함)
 #     CROP_MODEL=models/yolov8n_288x640.onnx CROP_INPUT=288x640 bash scripts/run_eval_set.sh eval/videos.csv tensorrt_fp16
 #   결과는 results/eval/<backend>_crop<HxW>/ 에 따로 모임
+#   int8 실험 엔진으로 돌리려면 INT8_VARIANT 에 이름을 줌 (adas 의 --int8-variant). 엔진은 미리 만들어 두는 게 좋음
+#     INT8_VARIANT=minmax CROP_MODEL=... CROP_INPUT=... bash scripts/run_eval_set.sh eval/videos.csv tensorrt_int8
+#   결과는 results/eval/<backend>_crop<HxW>_<variant>/ 에 따로 모임 (정식 INT8 결과와 안 섞임)
 set -euo pipefail
 
 LIST="${1:-eval/videos.csv}"
@@ -14,6 +17,7 @@ VIDEO_DIR="${VIDEO_DIR:-videos/eval}"
 POWER_MODE="${POWER_MODE:-MAXN_SUPER}"
 CROP_MODEL="${CROP_MODEL:-}"
 CROP_INPUT="${CROP_INPUT:-}"
+INT8_VARIANT="${INT8_VARIANT:-}"
 
 # crop 옵션은 짝으로만 씀. 결과 폴더·run_id 에 crop 크기를 붙여 640 결과와 안 섞이게 함
 CROP_ARGS=()
@@ -27,7 +31,15 @@ if [[ -n "${CROP_MODEL}" || -n "${CROP_INPUT}" ]]; then
     CROP_TAG="_crop${CROP_INPUT}"
 fi
 
-OUT_DIR="results/eval/${BACKEND}${CROP_TAG}"
+# int8 실험 엔진: 폴더·run_id 에 variant 이름을 붙임
+VARIANT_ARGS=()
+VARIANT_TAG=""
+if [[ -n "${INT8_VARIANT}" ]]; then
+    VARIANT_ARGS=(--int8-variant "${INT8_VARIANT}")
+    VARIANT_TAG="_${INT8_VARIANT}"
+fi
+
+OUT_DIR="results/eval/${BACKEND}${CROP_TAG}${VARIANT_TAG}"
 mkdir -p "${OUT_DIR}"
 
 # 헤더 건너뜀, 빈 줄·# 줄 무시, Windows 줄바꿈 제거
@@ -43,12 +55,12 @@ tail -n +2 "${LIST}" | tr -d '\r' | grep -v '^[[:space:]]*$' | grep -v '^#' \
         continue
     fi
     roi="${x1},${y1},${x2},${y2},${x3},${y3},${x4},${y4}"
-    run_id="eval_${id}_${BACKEND}${CROP_TAG}"
-    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG} roi=${roi}"
+    run_id="eval_${id}_${BACKEND}${CROP_TAG}${VARIANT_TAG}"
+    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG}${VARIANT_TAG} roi=${roi}"
 
     if ! ./build/apps/adas "${video}" --backend "${BACKEND}" --power-mode "${POWER_MODE}" \
             --deadline-ms 66.7 --run-id "${run_id}" --no-video --lane-roi "${roi}" \
-            "${CROP_ARGS[@]}" \
+            "${CROP_ARGS[@]}" "${VARIANT_ARGS[@]}" \
             > "${OUT_DIR}/${id}.log" 2>&1; then
         echo "[FAIL] ${id} (로그: ${OUT_DIR}/${id}.log)" >&2
         continue

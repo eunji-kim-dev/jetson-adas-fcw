@@ -28,6 +28,10 @@
  *   --camera <장치>            입력을 영상 파일 대신 V4L2 카메라로 (예: /dev/video0). 640x480 YUYV 30fps 로 열고 자동 노출을 끔
  *                              스트림이 끝나지 않으므로 --measured-frames 로 멈춤. 준비 구간은 --warmup-frames 40 으로 분석에서 뺌
  *   --threaded-capture         캡처 스레드를 분리하고 최신 프레임만 처리함 (기본 꺼짐 = 기존 동기 경로, golden 보존)
+ *   --int8-variant <이름>       tensorrt_int8 실험용. 엔진·calibration 캐시를 <모델>.int8-<이름>.* 로 따로 만듦 (정식 엔진 보존)
+ *   --int8-calibrator <종류>    entropy (기본) | minmax. --int8-variant 와 같이 줘야 함
+ *   --int8-shuffle-seed <n>    calibration 이미지 순서를 시드 n 으로 섞음. --int8-variant 와 같이 줘야 함
+ *   --int8-fp32-head           검출 헤드(/model.22/) 층을 FP32 로 강제. --int8-variant 와 같이 줘야 함
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -46,6 +50,10 @@ struct RunOptions {
     std::string cropCalibList;    // int8 전용. crop 모델 calibration 이미지 목록
     std::string cameraDevice;     // 비어 있으면 영상 파일(inputPath), 아니면 V4L2 장치 경로
     bool threadedCapture = false; // true 면 캡처 스레드 분리 (최신 프레임 우선)
+    std::string int8Variant;      // int8 실험 이름. 비어 있으면 정식 엔진
+    std::string int8Calibrator = "entropy";  // entropy | minmax
+    int int8ShuffleSeed = -1;     // 0 이상이면 calibration 순서 섞음
+    bool int8Fp32Head = false;    // 헤드 FP32 강제
 };
 
 inline void printUsage(const std::string& programName) {
@@ -55,7 +63,8 @@ inline void printUsage(const std::string& programName) {
               << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
               << " [--crop-model PATH --crop-input HxW]"
               << " [--calib-list TXT] [--crop-calib-list TXT]"
-              << " [--camera /dev/videoN] [--threaded-capture]\n";
+              << " [--camera /dev/videoN] [--threaded-capture]"
+              << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -147,6 +156,18 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             if (!takeValue(i, argument, options.cameraDevice)) return false;
         } else if (argument == "--threaded-capture") {
             options.threadedCapture = true;
+        } else if (argument == "--int8-variant") {
+            if (!takeValue(i, argument, options.int8Variant)) return false;
+        } else if (argument == "--int8-calibrator") {
+            if (!takeValue(i, argument, options.int8Calibrator)) return false;
+            if (options.int8Calibrator != "entropy" && options.int8Calibrator != "minmax") {
+                std::cerr << "[ERROR] --int8-calibrator 는 entropy 또는 minmax: " << options.int8Calibrator << '\n';
+                return false;
+            }
+        } else if (argument == "--int8-shuffle-seed") {
+            if (!takeInt(i, argument, options.int8ShuffleSeed)) return false;
+        } else if (argument == "--int8-fp32-head") {
+            options.int8Fp32Head = true;
         } else if (argument == "--crop-model") {
             if (!takeValue(i, argument, options.cropModelPath)) return false;
         } else if (argument == "--crop-input") {
@@ -184,6 +205,12 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
     if (hasCropModel != hasCropInput) {
         std::cerr << "[ERROR] --crop-model 과 --crop-input 은 같이 줘야 함\n";
         printUsage(programName);
+        return false;
+    }
+    // int8 실험 옵션은 이름 없이 쓰면 정식 엔진·캐시 파일을 덮어쓰므로 막음
+    const bool hasInt8Experiment = options.int8Calibrator != "entropy" || options.int8ShuffleSeed >= 0 || options.int8Fp32Head;
+    if (hasInt8Experiment && options.int8Variant.empty()) {
+        std::cerr << "[ERROR] --int8-calibrator / --int8-shuffle-seed / --int8-fp32-head 는 --int8-variant 이름과 같이 줘야 함 (정식 엔진 보호)\n";
         return false;
     }
     return true;
