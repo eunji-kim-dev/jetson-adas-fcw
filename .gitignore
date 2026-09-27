@@ -47,4 +47,5 @@ results/eval/
 # INT8 calibration 이미지·캐시
 calib/
 calib_smoke/
-models/*.calibresults/int8_layers/
+models/*.calib
+results/int8_layers/
