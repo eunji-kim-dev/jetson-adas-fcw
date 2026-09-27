@@ -24,8 +24,7 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMAS = {1, 2, 3, 4}   # v4: crop_model, crop_input 추가 (읽기에는 영향 없음)
-
+SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5}   # v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음)
 
 # ---------- 유틸 ----------
 
@@ -165,10 +164,14 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
             ages.append((to_int(r["decision_ts_ns"]) - to_int(r["capture_ts_ns"])) / 1e6)
     result["frame_age_ms_p50"] = percentile(ages, 50)
     result["frame_age_ms_p95"] = percentile(ages, 95)
+    result["frame_age_ms_max"] = max(ages) if ages else None
 
-    # Frame Drop: frame_seq 건너뜀
+    # Frame Drop: frame_seq 건너뜀 (카메라 쪽 누락 + 프로그램 쪽 버림 합)
     seqs = [to_int(r["frame_seq"]) for r in measured]
     result["frame_drops"] = sum(max(0, b - a - 1) for a, b in zip(seqs, seqs[1:]))
+    # v5 부터 두 종류를 따로 기록함. 카메라 쪽 = sequence 건너뜀, 프로그램 쪽 = threaded 모드에서 덮어써 버린 수
+    result["source_drops"] = sum(to_int(r.get("source_drops")) or 0 for r in measured) if "source_drops" in measured[0] else None
+    result["app_drops"] = sum(to_int(r.get("app_drops")) or 0 for r in measured) if "app_drops" in measured[0] else None
 
     # FCW Task Metric (lead 컬럼이 있는 run 만)
     has_fcw = any(r.get("lead_id") not in ("", None) for r in measured)
@@ -204,7 +207,10 @@ PER_RUN_COLUMNS = [
     ("deadline_miss_rate", "miss rate", 3),
     ("frame_age_ms_p50", "age p50", 1),
     ("frame_age_ms_p95", "age p95", 1),
+    ("frame_age_ms_max", "age max", 1),
     ("frame_drops", "drops", 0),
+    ("source_drops", "drop src", 0),
+    ("app_drops", "drop app", 0),
     ("lead_segments", "LEAD seg", 0),
     ("lead_segment_median_s", "seg med s", 2),
     ("lead_short_segment_ratio", "short ratio", 3),
@@ -273,7 +279,8 @@ def main():
     print("deadline_ms: " + ", ".join(f"{r['run_id']}={fmt(r['deadline_ms'], 1)}" for r in results))
     print("hardware: " + "; ".join(sorted({r["hardware"] or "unknown" for r in results})))
     print("frame age: capture_ts_clock == monotonic 인 run 에서만 계산 (영상 파일은 n/a)")
-
+    print("drops: frame_seq 건너뜀 합. drop src = 카메라 쪽 누락, drop app = 프로그램 쪽 버림 (threaded). v5 미만 로그는 n/a")
+    
     if len(results) > 1:
         print("\n== run 간 변동 (min / max / (max-min)/median) ==")
         table = []

@@ -25,6 +25,9 @@
  *   --calib-list <txt>         tensorrt_int8 전용. 전체 프레임 모델의 calibration 이미지 목록 (한 줄에 경로 하나)
  *   --crop-calib-list <txt>    tensorrt_int8 + --crop-model 전용. crop 모델의 calibration 이미지 목록
  *                              둘 다 int8 엔진을 처음 만들 때만 필요함. 엔진·캐시가 있으면 생략 가능
+ *   --camera <장치>            입력을 영상 파일 대신 V4L2 카메라로 (예: /dev/video0). 640x480 YUYV 30fps 로 열고 자동 노출을 끔
+ *                              스트림이 끝나지 않으므로 --measured-frames 로 멈춤. 준비 구간은 --warmup-frames 40 으로 분석에서 뺌
+ *   --threaded-capture         캡처 스레드를 분리하고 최신 프레임만 처리함 (기본 꺼짐 = 기존 동기 경로, golden 보존)
  */
 struct RunOptions {
     std::string inputPath = "videos/input.mp4";
@@ -41,6 +44,8 @@ struct RunOptions {
     int cropInputWidth = 0;       // --crop-input 의 W. 0 이면 미지정
     std::string calibList;        // int8 전용. 전체 프레임 모델 calibration 이미지 목록
     std::string cropCalibList;    // int8 전용. crop 모델 calibration 이미지 목록
+    std::string cameraDevice;     // 비어 있으면 영상 파일(inputPath), 아니면 V4L2 장치 경로
+    bool threadedCapture = false; // true 면 캡처 스레드 분리 (최신 프레임 우선)
 };
 
 inline void printUsage(const std::string& programName) {
@@ -49,7 +54,8 @@ inline void printUsage(const std::string& programName) {
               << " [--warmup-frames N] [--measured-frames N]"
               << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
               << " [--crop-model PATH --crop-input HxW]"
-              << " [--calib-list TXT] [--crop-calib-list TXT]\n";
+              << " [--calib-list TXT] [--crop-calib-list TXT]"
+              << " [--camera /dev/videoN] [--threaded-capture]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -137,6 +143,10 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             if (!takeValue(i, argument, options.calibList)) return false;
         } else if (argument == "--crop-calib-list") {
             if (!takeValue(i, argument, options.cropCalibList)) return false;
+        } else if (argument == "--camera") {
+            if (!takeValue(i, argument, options.cameraDevice)) return false;
+        } else if (argument == "--threaded-capture") {
+            options.threadedCapture = true;
         } else if (argument == "--crop-model") {
             if (!takeValue(i, argument, options.cropModelPath)) return false;
         } else if (argument == "--crop-input") {

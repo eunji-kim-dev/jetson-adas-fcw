@@ -24,7 +24,8 @@ const char* const kCsvHeader =
     "preprocess_full_ms,inference_full_ms,postprocess_full_ms,"
     "preprocess_crop_ms,inference_crop_ms,postprocess_crop_ms,"
     "merge_ms,detect_ms,tracking_ms,decision_ms,total_processing_ms,output_ms,deadline_miss,"
-    "detections,tracks,lead_id,lead_found,ttc_p,risk_state,warning_state,scene_changed";
+    "detections,tracks,lead_id,lead_found,ttc_p,risk_state,warning_state,scene_changed,"
+    "source_drops,app_drops";
 
 std::string jsonEscape(const std::string& text) {
     std::string out;
@@ -132,7 +133,8 @@ void RunLogger::writeFrame(const FrameRecord& r) {
               << (r.deadlineMiss ? 1 : 0) << ','
               << r.detections << ',' << r.tracks << ','
               << cell(r.leadId) << ',' << cell(r.leadFound) << ',' << cell(r.ttcP) << ','
-              << cell(r.riskState) << ',' << cell(r.warningState) << ',' << cell(r.sceneChanged)
+              << cell(r.riskState) << ',' << cell(r.warningState) << ',' << cell(r.sceneChanged) << ','
+              << r.sourceDrops << ',' << r.appDrops
               << '\n';
     ++framesProcessed_;
 }
@@ -177,6 +179,7 @@ void RunLogger::writeSummary() {
          << "  \"source_fps\": " << formatDouble(m.sourceFps, 3) << ",\n"
          << "  \"capture_ts_clock\": " << jsonString(m.captureTsClock) << ",\n"
          << "  \"capture_ts_source\": " << jsonString(m.captureTsSource) << ",\n"
+         << "  \"capture_mode\": " << jsonString(m.captureMode) << ",\n"
          << "\n"
          << "  \"model\": " << jsonString(m.model) << ",\n"
          << "  \"model_hash\": " << jsonString(m.modelHash) << ",\n"

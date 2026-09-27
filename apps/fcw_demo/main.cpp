@@ -22,6 +22,8 @@
 #include "perception/FrameSource.hpp"
 #include "perception/InferenceBackend.hpp"
 #include "perception/MultiObjectTracker.hpp"
+#include "perception/ThreadedFrameSource.hpp"
+#include "perception/V4l2CameraSource.hpp"
 #include "perception/VideoFileSource.hpp"
 #include "perception/YoloDetector.hpp"
 #include "adas/LeadSelector.hpp"
@@ -265,11 +267,13 @@ void drawCenteredKoreanText(KoreanTextRenderer& renderer, cv::Mat& frame, const 
 int main(int argc, char* argv[]) {
     RunOptions options;
     if (!parseRunOptions(argc, argv, "adas", options)) return 1;
-    const std::string& inputPath = options.inputPath;
+    // --camera 면 장치 경로가 입력 이름이 됨 (결과 파일은 results/video0_frames.csv 처럼 장치 이름으로)
+    const bool useCamera = !options.cameraDevice.empty();
+    const std::string inputName = useCamera ? options.cameraDevice : options.inputPath;
     const std::string& backendName = options.backendName;
 
     const std::string modelPath = "models/yolov8n.onnx";
-    const std::string inputStem = std::filesystem::path(inputPath).stem().string();
+    const std::string inputStem = std::filesystem::path(inputName).stem().string();
     const std::string outputPath = "results/" + inputStem + "_output.avi";
     const std::string csvPath = "results/" + inputStem + "_frames.csv";
     // 경고 배너 기록용. 골든 MD5 대상인 _frames.csv 와 분리함
@@ -320,16 +324,29 @@ int main(int argc, char* argv[]) {
         std::cout << "[INFO] crop 추론: " << options.cropModelPath << " (" << options.cropInputHeight << "x" << options.cropInputWidth << ")\n";
     }
 
-    // 영상 입력은 FrameSource 인터페이스 뒤에 둔다
-    // 실시간 카메라(CameraSource)로 바꿀 때 이 생성부만 교체하면 됨
+    // 영상 입력은 FrameSource 인터페이스 뒤에 둠
+    // --camera 면 V4L2 카메라, 아니면 영상 파일. --threaded-capture 면 그 위에 캡처 스레드를 씌움
+    // 둘 다 없으면 예전과 같은 VideoFileSource 동기 경로 (golden 보존)
     std::unique_ptr<FrameSource> sourcePtr;
     try {
-        sourcePtr = std::make_unique<VideoFileSource>(inputPath);
+        if (useCamera) {
+            sourcePtr = std::make_unique<V4l2CameraSource>(options.cameraDevice, 640, 480, 30.0);
+        } else {
+            sourcePtr = std::make_unique<VideoFileSource>(inputName);
+        }
+        if (options.threadedCapture) sourcePtr = std::make_unique<ThreadedFrameSource>(std::move(sourcePtr));
     } catch (const std::exception& error) {
         std::cerr << "[ERROR] " << error.what() << '\n';
         return 1;
     }
     FrameSource& source = *sourcePtr;
+    if (useCamera) {
+        std::cout << "[INFO] 입력: 카메라 " << options.cameraDevice << " " << source.width() << "x" << source.height()
+                  << " YUYV @ " << source.fps() << "fps (자동 노출 끔)\n";
+    } else {
+        std::cout << "[INFO] 입력: 영상 파일 " << inputName << '\n';
+    }
+    std::cout << "[INFO] 캡처: " << (options.threadedCapture ? "스레드 분리 (최신 프레임 우선)" : "동기 (읽기와 처리를 한 스레드에서)") << '\n';
 
     const int width = source.width();
     const int height = source.height();
@@ -426,13 +443,16 @@ int main(int argc, char* argv[]) {
     runMetadata.temperatureStartC = jetson_env::readSocTemperatureC();
     runMetadata.jetsonClocks = jetson_env::readJetsonClocksActive();
     runMetadata.opencvVersion = CV_VERSION;
-    runMetadata.inputSource = "video_file";
-    runMetadata.inputName = inputPath;
-    runMetadata.inputHash = RunLogger::hashFile(inputPath);
+    runMetadata.inputSource = useCamera ? "camera" : "video_file";
+    runMetadata.inputName = inputName;
+    // 장치 노드는 해시할 파일이 아니므로 카메라는 비워 둠
+    runMetadata.inputHash = useCamera ? "" : RunLogger::hashFile(inputName);
     runMetadata.resolution = std::to_string(width) + "x" + std::to_string(height);
     runMetadata.sourceFps = sourceFps;
-    runMetadata.captureTsClock = toString(CaptureTimestampClock::Stream);
-    runMetadata.captureTsSource = toString(CaptureTimestampSource::VideoPts);
+    // 프레임마다의 실제 클럭은 raw_frame_log 의 capture_ts_clock 열에 따로 남음
+    runMetadata.captureTsClock = toString(useCamera ? CaptureTimestampClock::Monotonic : CaptureTimestampClock::Stream);
+    runMetadata.captureTsSource = toString(useCamera ? CaptureTimestampSource::V4l2Monotonic : CaptureTimestampSource::VideoPts);
+    runMetadata.captureMode = options.threadedCapture ? "threaded" : "sync";
     runMetadata.model = modelPath;
     runMetadata.modelHash = RunLogger::hashFile(modelPath);
     runMetadata.fullCropStrategy = "full+crop_every_frame";
@@ -479,6 +499,9 @@ int main(int argc, char* argv[]) {
     Frame captured;
     int processedFrames = 0;
     double totalInferenceMilliseconds = 0.0, totalFullYoloMilliseconds = 0.0, totalFarYoloMilliseconds = 0.0, totalPostprocessMilliseconds = 0.0;
+    // 카메라 입력 요약용 (준비 구간 포함 전체 합. 준비 구간을 뺀 값은 analyze_runs.py 가 냄)
+    double totalFrameAgeMs = 0.0, maxFrameAgeMs = 0.0;
+    std::int64_t totalSourceDrops = 0, totalAppDrops = 0;
 
     const auto totalStart = std::chrono::steady_clock::now();
 
@@ -655,6 +678,19 @@ int main(int argc, char* argv[]) {
         // 이 프레임의 판정(경고 배너)이 확정된 순간
         const auto decisionTime = std::chrono::steady_clock::now();
 
+        // Frame Age = 판정이 끝난 시각 - 카메라 노출 시작 시각
+        // 둘 다 CLOCK_MONOTONIC 일 때만 의미 있음. 파일 입력은 PTS 라 계산하지 않음 (기존 출력 그대로)
+        totalSourceDrops += captured.droppedBySource;
+        totalAppDrops += captured.droppedByApp;
+        if (captured.captureTimestampClock == CaptureTimestampClock::Monotonic) {
+            const std::int64_t decisionNs = std::chrono::duration_cast<std::chrono::nanoseconds>(decisionTime.time_since_epoch()).count();
+            const double frameAgeMs = static_cast<double>(decisionNs - captured.captureTimestampNs) / 1.0e6;
+            totalFrameAgeMs += frameAgeMs;
+            maxFrameAgeMs = std::max(maxFrameAgeMs, frameAgeMs);
+            std::cout << std::fixed << std::setprecision(1) << "[CAM] frame=" << processedFrames << " seq=" << captured.frameSeq
+                      << " age=" << frameAgeMs << " ms | drop src=" << captured.droppedBySource << " app=" << captured.droppedByApp << '\n';
+        }
+
         // 장면 전환 직후의 위험 분석 대기 시간을 한 프레임 줄임
         if (sceneWarmupRemaining > 0) --sceneWarmupRemaining;
 
@@ -785,6 +821,8 @@ int main(int argc, char* argv[]) {
         record.riskState = riskLevel;
         record.warningState = RiskAnalyzer::toString(warningPolicy.bannerLevel());
         record.sceneChanged = sceneChanged;
+        record.sourceDrops = captured.droppedBySource;
+        record.appDrops = captured.droppedByApp;
         runLogger.writeFrame(record);
 
         // --measured-frames: warmup + 측정 프레임 수를 채우면 정지 (반복 측정용)
@@ -821,6 +859,11 @@ int main(int argc, char* argv[]) {
     std::cout << "평균 추론 시간: " << std::fixed << std::setprecision(2) << averageInferenceMilliseconds << " ms\n";
     std::cout << "추론 기준 FPS: " << std::fixed << std::setprecision(2) << inferenceFps << " FPS\n";
     std::cout << "전체 처리 속도: " << std::fixed << std::setprecision(2) << processingFps << " FPS\n";
+    if (useCamera) {
+        const double averageFrameAgeMs = processedFrames > 0 ? totalFrameAgeMs / static_cast<double>(processedFrames) : 0.0;
+        std::cout << "Frame Age 평균 / 최대 (준비 구간 포함): " << std::fixed << std::setprecision(1) << averageFrameAgeMs << " / " << maxFrameAgeMs << " ms\n";
+        std::cout << "Frame Drop 카메라 쪽 / 프로그램 쪽: " << totalSourceDrops << " / " << totalAppDrops << '\n';
+    }
     if (options.writeVideo) std::cout << "결과 파일: " << outputPath << '\n';
     else                    std::cout << "결과 영상: 생략 (--no-video)\n";
     std::cout << "실행 로그: " << runLogger.runDirectory() << '\n';

@@ -63,6 +63,10 @@ inline std::string toString(CaptureTimestampClock clock) {
  *                        ROS2 rclcpp::Time(ns)이 모두 손실 없이 int64 ns로 바뀌기 때문
  * - captureTimestampClock  : 위 timestamp의 클럭 (같은 축인지 판단하는 기준)
  * - captureTimestampSource : 위 timestamp의 출처
+ * - droppedBySource    : 이 프레임 직전 구간에서 소스 쪽이 놓친 프레임 수
+ *                        (카메라: sequence 건너뜀. 영상 파일: 항상 0)
+ * - droppedByApp       : 이 프레임 직전 구간에서 프로그램 쪽이 버린 프레임 수
+ *                        (캡처 스레드 분리 모드에서 처리가 늦어 최신 프레임으로 덮어쓴 횟수. 동기 모드: 항상 0)
  */
 struct Frame {
     cv::Mat image;
@@ -70,4 +74,6 @@ struct Frame {
     std::int64_t captureTimestampNs = 0;
     CaptureTimestampClock captureTimestampClock = CaptureTimestampClock::Stream;
     CaptureTimestampSource captureTimestampSource = CaptureTimestampSource::VideoPts;
+    std::int64_t droppedBySource = 0;
+    std::int64_t droppedByApp = 0;
 };

@@ -30,6 +30,7 @@ struct RunMetadata {
     double sourceFps = 0.0;
     std::string captureTsClock;    // "stream" / "monotonic" / "realtime"
     std::string captureTsSource;   // "video_pts" / "v4l2_monotonic"
+    std::string captureMode;       // "sync" (읽고 처리를 한 스레드에서) / "threaded" (캡처 스레드 분리, 최신 프레임 우선)
 
     std::string model;
     std::string modelHash;
@@ -86,6 +87,9 @@ struct FrameRecord {
     std::optional<std::string> riskState;
     std::optional<std::string> warningState;
     std::optional<bool> sceneChanged;
+
+    std::int64_t sourceDrops = 0;          // 직전 구간에서 소스(카메라) 쪽이 놓친 프레임 수. 파일은 0
+    std::int64_t appDrops = 0;             // 직전 구간에서 프로그램이 버린 프레임 수 (threaded 모드). sync 는 0
 };
 
 /*
@@ -98,7 +102,7 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 4;   // v4: crop_model, crop_input 추가
+    static constexpr int kSchemaVersion = 5;   // v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

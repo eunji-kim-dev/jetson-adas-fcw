@@ -3,6 +3,8 @@ add_library(perception_core STATIC
     src/InferenceBackendFactory.cpp
     src/MultiObjectTracker.cpp
     src/OpenCVDNNBackend.cpp
+    src/ThreadedFrameSource.cpp
+    src/V4l2CameraSource.cpp
     src/VideoFileSource.cpp
     src/YoloCommon.cpp
     src/YoloDetector.cpp
@@ -20,8 +22,10 @@ target_include_directories(perception_core PUBLIC
 # - opencv_imgproc: YoloCommon.cpp의 letterbox(resize/copyMakeBorder)
 # - opencv_videoio: VideoFileSource.cpp의 cv::VideoCapture
 #                   (헤더에서는 전방 선언만 하므로 공개 의존성이 아님)
+# - Threads       : ThreadedFrameSource.hpp의 std::thread (헤더에 노출되므로 PUBLIC)
+# - V4l2CameraSource.cpp 는 리눅스 헤더(linux/videodev2.h)만 쓰므로 추가 링크 없음
 target_link_libraries(perception_core
-    PUBLIC opencv_core opencv_video
+    PUBLIC opencv_core opencv_video Threads::Threads
     PRIVATE opencv_imgproc opencv_dnn opencv_videoio
 )
 

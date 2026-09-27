@@ -39,6 +39,9 @@ else()
     )
 endif()
 
+# 캡처 스레드 분리(ThreadedFrameSource)의 std::thread 링크용
+find_package(Threads REQUIRED)
+
 if(ENABLE_TENSORRT)
     find_package(CUDAToolkit REQUIRED)
 
