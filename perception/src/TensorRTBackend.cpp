@@ -302,17 +302,26 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
             int forced = 0;
+            int skipped = 0;
             for (int i = 0; i < network->getNbLayers(); ++i) {
                 ILayer* layer = network->getLayer(i);
                 const std::string name = layer->getName() ? layer->getName() : "";
                 if (name.find("/model.22/") == std::string::npos) continue;
+                // 출력이 실수(float/half)가 아닌 층은 건너뜀. Reshape 목표 모양 같은 Int64 상수에 FP32 를 지정하면
+                // 빌드가 "cannot use precision Float with weights of type Int64" 로 거부됨 (9/27 밤 실패 원인)
+                bool floatOnly = layer->getNbOutputs() > 0;
+                for (int j = 0; j < layer->getNbOutputs(); ++j) {
+                    const DataType t = layer->getOutput(j)->getType();
+                    if (t != DataType::kFLOAT && t != DataType::kHALF) { floatOnly = false; break; }
+                }
+                if (!floatOnly) { ++skipped; continue; }
                 layer->setPrecision(DataType::kFLOAT);
                 for (int j = 0; j < layer->getNbOutputs(); ++j) layer->setOutputType(j, DataType::kFLOAT);
                 ++forced;
             }
             config->setFlag(BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
 #pragma GCC diagnostic pop
-            std::cerr << "[TensorRT] 헤드 FP32 강제: " << forced << " 층\n";
+            std::cerr << "[TensorRT] 헤드 FP32 강제: " << forced << " 층 (정수 출력이라 건너뜀: " << skipped << " 층)\n";
             if (forced == 0) throw std::runtime_error("/model.22/ 이름을 가진 층이 없음 — ONNX 층 이름을 확인할 것");
         }
     } else if (precision != "fp32") {
