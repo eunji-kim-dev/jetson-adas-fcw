@@ -15,6 +15,7 @@ Q5 정밀도 비교 — 평가셋 결과 폴더 두 개(기준 vs 비교)를 박
     3. LEAD 같은 차량 비율 — 두 쪽 다 LEAD 가 있는 프레임에서 LEAD 박스 IoU>=0.5
     4. LEAD ID 바뀐 횟수 — 충돌 전 구간(collision_frame 까지, 없으면 전체)
     5. 박스 아래 변(y+h) 차 분포 — 호모그래피용 (10/8 부터 봄)
+    6. 짝의 신뢰도 차(B−A) 중앙값, 0.1 넘게 떨어진 비율. --min-conf-a 로 기준 쪽만 문턱을 걸면 "대응 박스가 아예 없는 비율"이 됨
 
 출력:
     <out>_summary.csv   영상별 한 줄 + 전체 한 줄
@@ -117,7 +118,10 @@ def main():
     p.add_argument("--out", required=True, help="출력 파일 접두어")
     p.add_argument("--small-px", type=int, default=20, help="'작은 박스' 기준 높이 (기본 20px)")
     p.add_argument("--min-conf", type=float, default=0.0, help="이 신뢰도 미만 검출 박스는 양쪽 다 빼고 비교 (기본 0 = 전부)")
+    p.add_argument("--min-conf-a", type=float, default=None, help="기준 쪽(A)에만 거는 문턱. 비교 쪽은 --min-conf 그대로 (기본 없음 = --min-conf 와 같음)")
     args = p.parse_args()
+    # 기준 쪽만 걸어야 "신뢰도만 떨어진 박스"가 "사라진 박스"로 잘못 세어지지 않음
+    min_conf_a = args.min_conf if args.min_conf_a is None else args.min_conf_a
 
     with open(args.videos, encoding="utf-8", newline="") as f:
         videos = list(csv.DictReader(f))
@@ -152,7 +156,7 @@ def main():
             A, B = fa[fr], fb[fr]
             st["frames"] += 1
             # --min-conf: 약한 박스(문턱 근처)를 빼고 보면 양자화 잡음과 진짜 누락이 갈림
-            det_a = [d for d in A["det"] if d["conf"] >= args.min_conf]
+            det_a = [d for d in A["det"] if d["conf"] >= min_conf_a]
             det_b = [d for d in B["det"] if d["conf"] >= args.min_conf]
             if len(det_a) != len(det_b):
                 st["det_diff"] += 1
@@ -209,7 +213,8 @@ def main():
                     len(oa), fmt(median([b["h"] for b in oa])), fmt(100 * sum(b["h"] <= args.small_px for b in oa) / len(oa)) if oa else "", fmt(median([b["conf"] for b in oa]), 2),
                     len(ob), fmt(median([b["h"] for b in ob])), fmt(100 * sum(b["h"] <= args.small_px for b in ob) / len(ob)) if ob else "", fmt(median([b["conf"] for b in ob]), 2),
                     s["lead_both"], fmt(100 * s["lead_same"] / lb_), s["lead_only_a"], s["lead_only_b"], ca, cb,
-                    fmt(median(s["conf_diff"]), 3), fmt(100 * sum(d <= -0.1 for d in s["conf_diff"]) / m)]
+                    fmt(median(s["conf_diff"]), 3), fmt(100 * sum(d <= -0.1 for d in s["conf_diff"]) / m),
+                    fmt(100 * len(oa) / (s["matched"] + len(oa))) if (s["matched"] + len(oa)) else ""]
 
         summary_rows.append(row(vid, st, change_a, change_b))
         for k in ("matched", "h0", "h1", "h2", "b1", "b2", "lead_both", "lead_same", "lead_only_a", "lead_only_b", "frames", "det_diff"):
@@ -228,7 +233,7 @@ def main():
               f"only_{lb}", f"only_{lb}_h_median", f"only_{lb}_small_%", f"only_{lb}_conf_median",
               "lead_both_frames", "lead_same_vehicle_%", f"lead_only_{la}", f"lead_only_{lb}",
               f"lead_id_changes_precollision_{la}", f"lead_id_changes_precollision_{lb}",
-              f"conf_{lb}_minus_{la}_median", f"conf_drop_ge0.1_%"]
+              f"conf_{lb}_minus_{la}_median", f"conf_drop_ge0.1_%", f"only_{la}_ratio_%"]
 
     with open(args.out + "_summary.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
@@ -244,10 +249,10 @@ def main():
         w.writerows(only_rows)
 
     # 화면 출력: 핵심 열만
-    print(f"== {la} vs {lb} (기준 {la}, 신뢰도 >= {args.min_conf}) ==")
-    cols = [0, 1, 2, 3, 5, 6, 8, 9, 10, 13, 14, 17, 18, 21, 22, 23, 24]
+    print(f"== {la} vs {lb} (기준 {la}, 신뢰도 {la} >= {min_conf_a}, {lb} >= {args.min_conf}) ==")
+    cols = [0, 1, 2, 3, 5, 6, 8, 9, 10, 13, 14, 17, 18, 21, 22, 23, 24, 25]
     short = ["video", "frames", "detΔ", "matched", "h≤1px%", "h≤2px%", "bot≤2px%",
-             f"only_{la}", "h_med", f"only_{lb}", "h_med", "lead_both", "same%", f"idchg_{la}", f"idchg_{lb}", "confΔmed", "conf↓0.1%"]
+             f"only_{la}", "h_med", f"only_{lb}", "h_med", "lead_both", "same%", f"idchg_{la}", f"idchg_{lb}", "confΔmed", "conf↓0.1%", f"only_{la}%"]
     rows = [[str(r[c]) for c in cols] for r in summary_rows]
     widths = [max(len(short[i]), *(len(r[i]) for r in rows)) for i in range(len(cols))]
     print("  ".join(h.ljust(w) for h, w in zip(short, widths)))
