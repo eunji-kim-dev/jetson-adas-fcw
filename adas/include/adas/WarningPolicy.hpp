@@ -17,7 +17,8 @@
  */
 class WarningPolicy {
 public:
-    WarningPolicy(double sourceFps, int frameHeight);
+    // rules.gate 가 true 면 60% 위치 게이트를 DANGER && 겹침 50% 이상일 때 면제함. 생략하면 기존 게이트 그대로
+    WarningPolicy(double sourceFps, int frameHeight, const LeadRuleFlags& rules = LeadRuleFlags());
 
     // 화면 기하 조건을 통과하지 못한 위험 단계를 Safe로 되돌린다
     RiskResult applyGeometryGate(const RiskResult& rawRisk, const ObjectGeometry& geometry, bool isLeadTarget) const;
@@ -34,6 +35,7 @@ public:
 private:
     const int warningHoldFrames_;
     const int minimumLeadGroundYForWarning_;
+    const bool gateOverlapExemption_;
 
     int cautionHoldRemaining_ = 0;
     int dangerHoldRemaining_ = 0;

@@ -17,6 +17,9 @@ namespace {
 constexpr int cautionConfirmationFrames = 8;
 constexpr int dangerConfirmationFrames = 3;
 
+// --lead-rule gate: 박스가 lane 과 이 비율 이상 겹치면 60% 위치 조건을 면제함 (9/28, 01·08 로그로 잡음)
+constexpr float gateOverlapRatio = 0.50F;
+
 } // namespace
 
 /*
@@ -27,9 +30,10 @@ constexpr int dangerConfirmationFrames = 3;
  * minimumLeadGroundYForWarning: 시간 기반 위험 조건(샘플 수, 크기,
  * 증가율, 접근 속도)은 RiskAnalyzer가 담당하고, 여기에는 화면 기하 조건만 둔다
  */
-WarningPolicy::WarningPolicy(double sourceFps, int frameHeight)
+WarningPolicy::WarningPolicy(double sourceFps, int frameHeight, const LeadRuleFlags& rules)
     : warningHoldFrames_(std::max(1, static_cast<int>(std::round(sourceFps * 0.25)))),
-      minimumLeadGroundYForWarning_(static_cast<int>(std::round(frameHeight * 0.60))) {}
+      minimumLeadGroundYForWarning_(static_cast<int>(std::round(frameHeight * 0.60))),
+      gateOverlapExemption_(rules.gate) {}
 
 void WarningPolicy::reset() {
     cautionHoldRemaining_ = 0;
@@ -48,7 +52,14 @@ RiskLevel WarningPolicy::bannerLevel() const {
 RiskResult WarningPolicy::applyGeometryGate(const RiskResult& rawRisk, const ObjectGeometry& geometry, bool isLeadTarget) const {
     // 시간 기반 조건은 RiskAnalyzer에서 이미 판단했으므로
     // 여기서는 화면 위치와 passing-by 여부만 검사한다.
-    const bool geometryAllowsWarning = isLeadTarget && (rawRisk.truncated || geometry.groundPoint.y >= minimumLeadGroundYForWarning_) && !geometry.passingBy;
+    //
+    // gate: 60% 위치 조건만 면제함. LEAD 여부·passing-by 는 그대로 AND 로 남김
+    // 큰 차·야간 차량은 접지점이 60% 선 위에 오래 머물러 배너 3연속을 못 채웠음 (01: 56부터, 08: 145에야 통과)
+    // RiskAnalyzer 가 DANGER 로 판정했고(성장·접지 속도·TTC·샘플·최소 높이 통과) 박스가 lane 과 절반 이상 겹치면 위치 조건 없이 통과
+    const bool positionAllowsWarning = rawRisk.truncated
+        || geometry.groundPoint.y >= minimumLeadGroundYForWarning_
+        || (gateOverlapExemption_ && rawRisk.level == RiskLevel::Danger && geometry.laneOverlap >= gateOverlapRatio);
+    const bool geometryAllowsWarning = isLeadTarget && positionAllowsWarning && !geometry.passingBy;
 
     RiskResult risk = rawRisk;
     if (risk.level != RiskLevel::Safe && !geometryAllowsWarning) {

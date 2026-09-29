@@ -24,7 +24,7 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5}   # v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음)
+SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5, 6}   # v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음). v6: lead_rule 추가
 
 # ---------- 유틸 ----------
 
@@ -127,6 +127,7 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
         "backend": summary.get("backend"),
         "precision": summary.get("precision"),
         "hardware": summary.get("hardware"),
+        "lead_rule": summary.get("lead_rule") or "none",   # v6 미만 로그는 none
         "frames": len(measured),
         "warmup": warmup,
         "deadline_ms": deadline_ms,
@@ -194,6 +195,7 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
 PER_RUN_COLUMNS = [
     ("run_id", "run", 0),
     ("git", "git", 0),
+    ("lead_rule", "lead rule", 0),
     ("frames", "frames", 0),
     ("fps", "FPS", 2),
     ("total_processing_ms_p50", "proc p50", 1),

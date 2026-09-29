@@ -38,6 +38,7 @@ struct RunMetadata {
     std::string cropModel;         // crop 추론 모델 경로. 전체 프레임과 같은 모델이면 "same_as_model"
     std::string cropInput;         // crop 추론 입력 크기 "HxW". 기본 "640x640"
     std::string laneRoi;           // "default" 또는 "x1,y1,...,x4,y4" (--lane-roi 픽셀 좌표)
+    std::string leadRule;          // "none" 또는 "overlap,gap" 처럼 --lead-rule 목록 (adas). perception_demo 는 비움
     int detectionInterval = 1;
     double confidenceThreshold = 0.0;
     double nmsThreshold = 0.0;
@@ -102,7 +103,7 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 5;   // v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
+    static constexpr int kSchemaVersion = 6;   // v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

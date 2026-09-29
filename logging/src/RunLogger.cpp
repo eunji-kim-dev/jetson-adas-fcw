@@ -187,6 +187,7 @@ void RunLogger::writeSummary() {
          << "  \"crop_model\": " << jsonString(m.cropModel) << ",\n"
          << "  \"crop_input\": " << jsonString(m.cropInput) << ",\n"
          << "  \"lane_roi\": " << jsonString(m.laneRoi) << ",\n"
+         << "  \"lead_rule\": " << jsonString(m.leadRule) << ",\n"
          << "  \"detection_interval\": " << m.detectionInterval << ",\n"
          << "  \"confidence_threshold\": " << formatDouble(m.confidenceThreshold, 3) << ",\n"
          << "  \"nms_threshold\": " << formatDouble(m.nmsThreshold, 3) << ",\n"

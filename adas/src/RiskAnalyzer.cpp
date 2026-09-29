@@ -6,11 +6,45 @@
 #include <stdexcept>
 #include <vector>
 
+namespace {
+
+// --lead-rule history 의 높이 증가 검사용
+// 등속 접근이면 h ∝ 1/Z 이고 Z 는 시간에 선형이므로 1/h 가 시간에 선형임
+// 샘플의 1/h 를 시간에 대해 최소제곱 직선으로 맞춰 targetFrame 시점의 1/h 를 돌려줌
+// log 높이 회귀 기울기(구간 평균 1/TTC)를 순간값처럼 쓰면 충돌이 가까울수록 예상이 실제보다 작아짐 — 그래서 따로 둠
+// 샘플이 2개 미만이거나 시간이 전부 같으면 false
+template <typename Samples>
+bool predictInverseHeight(const Samples& samples, double fps, int targetFrame, double& inverseHeightOut) {
+    if (samples.size() < 2) return false;
+    const int firstFrame = samples.front().frameIndex;
+    double meanTime = 0.0, meanValue = 0.0;
+    for (const auto& sample : samples) {
+        meanTime += static_cast<double>(sample.frameIndex - firstFrame) / fps;
+        meanValue += 1.0 / std::max(static_cast<double>(sample.boxHeight), 1.0);
+    }
+    meanTime /= static_cast<double>(samples.size());
+    meanValue /= static_cast<double>(samples.size());
+    double numerator = 0.0, denominator = 0.0;
+    for (const auto& sample : samples) {
+        const double timeDifference = static_cast<double>(sample.frameIndex - firstFrame) / fps - meanTime;
+        numerator += timeDifference * (1.0 / std::max(static_cast<double>(sample.boxHeight), 1.0) - meanValue);
+        denominator += timeDifference * timeDifference;
+    }
+    if (denominator <= 1.0e-9) return false;
+    const double slope = numerator / denominator;
+    const double targetTime = static_cast<double>(targetFrame - firstFrame) / fps;
+    inverseHeightOut = meanValue + slope * (targetTime - meanTime);
+    return true;
+}
+
+} // namespace
+
 RiskAnalyzer::RiskAnalyzer(
     double fps,
     int frameHeight,
     int historySize,
-    int staleFrameLimit
+    int staleFrameLimit,
+    float heightCollapseResetRatio
 )
     : fps_(fps),
 
@@ -25,7 +59,10 @@ RiskAnalyzer::RiskAnalyzer(
 
       // 같은 ID가 다시 나타나도 공백이 5프레임 넘으면 이전 움직임이랑 안 이어붙임
       // (오래 놓쳤다가 다시 잡히면 박스 크기가 확 달라져서 TTC가 이상하게 튐)
-      maximumHistoryGapFrames_(5) {
+      maximumHistoryGapFrames_(5),
+
+      // 0 이면 끔. 음수는 0 으로 취급함
+      heightCollapseResetRatio_(std::max(heightCollapseResetRatio, 0.0F)) {
     if (fps_ <= 0.0) {
         throw std::invalid_argument("RiskAnalyzer FPS must be greater than zero.");
     }
@@ -261,6 +298,50 @@ RiskResult RiskAnalyzer::update(
     const float groundY = truncated
         ? static_cast<float>(trackedObject.box.y) + boxHeight
         : static_cast<float>(rawBottom);
+
+    // --lead-rule history: 마지막 관측 대비 박스 높이가 설명이 안 되게 튀면 이력 전체(샘플 + 안정화 상태)를 초기화함
+    // 08번 147 프레임 362→131 같은 붕괴를 이전 추세에 이어 붙이면 TTC 가 엉뚱하게 나옴
+    // 감소와 증가를 다르게 봄
+    //   감소: 40% 넘게 줄면 붕괴로 봄. 차가 0.33초(5프레임) 안에 1.7배 멀어지는 일은 없음
+    //   증가: 급접근이면 정확한 박스도 빠르게 커짐 (TTC 0.4초에서 3프레임 뒤 2배가 등속 접근의 정상값)
+    //         그래서 이전 샘플의 1/h 를 시간에 선형으로 맞춰(등속 접근 모델) 지금 시점의 예상 높이를 구하고,
+    //         관측 높이가 max(예상, 직전 관측)보다 40% 넘게 크면 초기화함
+    //         boxHeight 는 절단 보정값(폭 ÷ 절단 직전 종횡비)이라 화면 높이보다 커지는 게 정상 → 예상에 화면 상한을 두지 않음
+    //         예측 불가(예상 1/h ≤ 0 = 모델상 충돌 시점을 지남, 또는 샘플 2개 미만)면 증가 검사는 생략하고 감소 검사만 둠
+    //         — 충돌 직전의 급접근 이력을 지우지 않는 쪽을 우선한 정책임. 이 구간에서 다른 차로 ID 가 옮겨 붙는 경우는 못 거름
+    // 짧은 공백(1~5프레임) 뒤 재등장한 프레임도 같은 기준으로 검사함 — 공백을 이어 쓰는 gap 규칙에서 재등장 프레임이 잘못된 박스가 섞이는 자리임
+    // 5프레임 넘는 공백은 위 maximumHistoryGapFrames_ 에서 이미 초기화됨. 40% 는 큰 붕괴만 걸러내는 실험값임
+    // 절단 보정용 종횡비는 이번 프레임 값으로 다시 채움
+    if (heightCollapseResetRatio_ > 0.0F && !history.samples.empty()) {
+        const Sample& previous = history.samples.back();
+        const int elapsedFrames = currentFrame - previous.frameIndex;
+        if (elapsedFrames >= 1) {
+            const float previousHeight = std::max(previous.boxHeight, 1.0F);
+            bool collapsed = false;
+            if (boxHeight < previousHeight * (1.0F - heightCollapseResetRatio_)) {
+                collapsed = true;
+            } else if (boxHeight > previousHeight * (1.0F + heightCollapseResetRatio_)) {
+                double predictedInverseHeight = 0.0;
+                const bool predictionUsable =
+                    predictInverseHeight(history.samples, fps_, currentFrame, predictedInverseHeight) &&
+                    predictedInverseHeight > 1.0e-6;
+                if (predictionUsable) {
+                    const float predictedHeight = static_cast<float>(1.0 / predictedInverseHeight);
+                    // 멀어지던 추세(예상이 직전보다 작음)에서는 직전 관측을 기준으로 둠
+                    const float expectedHeight = std::max(previousHeight, predictedHeight);
+                    collapsed = boxHeight > expectedHeight * (1.0F + heightCollapseResetRatio_);
+                }
+                // 예측 불가면 증가로는 초기화하지 않음 (위 주석의 정책)
+            }
+            if (collapsed) {
+                resetTrackHistory(history);
+                if (!truncated) {
+                    history.lastAspectRatio =
+                        static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
+                }
+            }
+        }
+    }
 
     // update()가 같은 프레임에 두 번 불리는 경우 대비 - 중복 추가 말고 덮어씀
     if (!history.samples.empty() &&

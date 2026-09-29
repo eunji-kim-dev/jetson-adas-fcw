@@ -29,11 +29,14 @@ struct RiskResult {
 
 class RiskAnalyzer {
 public:
+    // heightCollapseResetRatio: 연속 프레임 박스 높이 변화가 이 비율을 넘으면 그 트랙 이력을 초기화함
+    // 0 이면 끔 (기존 동작). --lead-rule history 에서 0.40 으로 켬
     explicit RiskAnalyzer(
         double fps,
         int frameHeight,
         int historySize = 15,
-        int staleFrameLimit = 60
+        int staleFrameLimit = 60,
+        float heightCollapseResetRatio = 0.0F
     );
 
     RiskResult update(
@@ -99,6 +102,7 @@ private:
     std::size_t historySize_;
     int staleFrameLimit_;
     int maximumHistoryGapFrames_;
+    float heightCollapseResetRatio_;
 
     std::unordered_map<int, TrackHistory> histories_;
 };

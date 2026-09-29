@@ -428,11 +428,27 @@ int main(int argc, char* argv[]) {
                   << ") BL(" << egoLaneRoi[3].x << "," << egoLaneRoi[3].y << ")\n";
     }
 
-    MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
-    LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps);
-    WarningPolicy warningPolicy(sourceFps, height);
-    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60);
+    // --lead-rule 플래그. 없으면 전부 false = 기존 규칙 (golden 보존)
+    // 이름 목록은 RunOptions 에서 이미 검사됐음. 표기용 문자열은 run_summary 의 lead_rule 에도 그대로 씀
+    LeadRuleFlags leadRules;
+    std::string leadRuleText;
+    for (const std::string& rule : options.leadRules) {
+        if (rule == "overlap") leadRules.overlap = true;
+        else if (rule == "history") leadRules.history = true;
+        else if (rule == "gap") leadRules.gap = true;
+        else if (rule == "passby") leadRules.passby = true;
+        else if (rule == "gate") leadRules.gate = true;
+        if (!leadRuleText.empty()) leadRuleText += ',';
+        leadRuleText += rule;
+    }
+    if (leadRuleText.empty()) leadRuleText = "none";
+    std::cout << "[INFO] LEAD 규칙: " << (options.leadRules.empty() ? "기본 (접지점 lane 안 후보, 60% 게이트)" : leadRuleText) << '\n';
 
+    MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
+    LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps, leadRules);
+    WarningPolicy warningPolicy(sourceFps, height, leadRules);
+    // history 규칙이면 연속 프레임 높이 40% 붕괴 시 이력 초기화를 켬
+    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60, leadRules.history ? 0.40F : 0.0F);
     /*
      * 장면 전환 직후에는 이전 장면의 추적과 TTC-P 이력이
      * 새 장면으로 이어지지 않도록 약 0.5초 동안 위험 분석을 쉼
@@ -485,6 +501,8 @@ int main(int argc, char* argv[]) {
         }
         runMetadata.laneRoi = roiStream.str();
     }    
+    // 어느 LEAD 규칙으로 나온 결과인지 run_summary 에 남김 (플래그별 효과 비교용)
+    runMetadata.leadRule = leadRuleText;
     runMetadata.detectionInterval = 1;
     runMetadata.confidenceThreshold = detectorThreshold;
     runMetadata.nmsThreshold = nmsThreshold;
@@ -600,7 +618,11 @@ int main(int argc, char* argv[]) {
 
             // ego lane 차량은 LEAD가 되기 전부터 TTC-P 샘플을 축적한다.
             // 실제 CAUTION/DANGER 단계 판정은 activeLeadId 한 대에만 수행한다.
-            const bool isAnalysisTarget = riskAnalysisEnabled && geometry.laneHeld && isVehicleClass(trackedObject.classId);
+            //
+            // history 규칙이면 lane 여부와 관계없이 차량 클래스 트랙 전부에 샘플을 쌓음
+            // 후보가 돼야 이력이 시작되면 후보를 일찍 잡아도 샘플 10개를 또 기다림 (10번: 후보 85 → LEAD 92 → 샘플 부족)
+            // 도로 ROI 로도 거르지 않음 — 10번 85 프레임 접지점 y=575 가 도로 ROI(64%) 밖이라
+            const bool isAnalysisTarget = riskAnalysisEnabled && isVehicleClass(trackedObject.classId) && (leadRules.history || geometry.laneHeld);
             const bool isLeadTarget = riskAnalysisEnabled && trackedObject.trackId == activeLeadId && geometry.laneHeld;
             
             const RiskResult rawRisk = riskAnalyzer.update(trackedObject, isAnalysisTarget, isLeadTarget, processedFrames);
@@ -656,7 +678,9 @@ int main(int argc, char* argv[]) {
             const auto leadIterator = std::find_if(trackedObjects.begin(), trackedObjects.end(), [&](const TrackedObject& candidate) { return candidate.trackId == activeLeadId; });
             const auto leadGeometryIterator = leadIterator != trackedObjects.end() ? geometryById.find(activeLeadId) : geometryById.end();
 
-            if (leadIterator != trackedObjects.end() && leadGeometryIterator != geometryById.end() && leadGeometryIterator->second.insideEgoLane) {
+            // overlap 규칙으로 잡힌 LEAD 는 접지점이 lane 밖일 수 있으므로 laneHeld 로도 그림 (기본 규칙은 그대로)
+            if (leadIterator != trackedObjects.end() && leadGeometryIterator != geometryById.end()
+                && (leadGeometryIterator->second.insideEgoLane || (leadRules.overlap && leadGeometryIterator->second.laneHeld))) {
                 const TrackedObject& trackedObject = *leadIterator;
                 const ObjectGeometry& geometry = leadGeometryIterator->second;
                 cv::Scalar leadBoxColor;

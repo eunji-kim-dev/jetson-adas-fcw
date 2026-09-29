@@ -9,6 +9,9 @@
 #   int8 실험 엔진으로 돌리려면 INT8_VARIANT 에 이름을 줌 (adas 의 --int8-variant). 엔진은 미리 만들어 두는 게 좋음
 #     INT8_VARIANT=minmax CROP_MODEL=... CROP_INPUT=... bash scripts/run_eval_set.sh eval/videos.csv tensorrt_int8
 #   결과는 results/eval/<backend>_crop<HxW>_<variant>/ 에 따로 모임 (정식 INT8 결과와 안 섞임)
+#   LEAD 규칙 플래그로 돌리려면 LEAD_RULE 에 쉼표 목록을 줌 (adas 의 --lead-rule)
+#     LEAD_RULE=overlap,history,gap,passby,gate CROP_MODEL=... CROP_INPUT=... bash scripts/run_eval_set.sh eval/videos.csv tensorrt_fp16
+#   결과는 results/eval/<backend>_crop<HxW>_<규칙을 - 로 이은 이름>/ 에 따로 모임 (예: ..._overlap-history-gap-passby-gate)
 set -euo pipefail
 
 LIST="${1:-eval/videos.csv}"
@@ -18,6 +21,7 @@ POWER_MODE="${POWER_MODE:-MAXN_SUPER}"
 CROP_MODEL="${CROP_MODEL:-}"
 CROP_INPUT="${CROP_INPUT:-}"
 INT8_VARIANT="${INT8_VARIANT:-}"
+LEAD_RULE="${LEAD_RULE:-}"
 
 # crop 옵션은 짝으로만 씀. 결과 폴더·run_id 에 crop 크기를 붙여 640 결과와 안 섞이게 함
 CROP_ARGS=()
@@ -39,7 +43,15 @@ if [[ -n "${INT8_VARIANT}" ]]; then
     VARIANT_TAG="_${INT8_VARIANT}"
 fi
 
-OUT_DIR="results/eval/${BACKEND}${CROP_TAG}${VARIANT_TAG}"
+# LEAD 규칙: 폴더·run_id 에 플래그 목록을 붙임 (쉼표는 폴더 이름에 안 어울려 - 로 바꿈)
+RULE_ARGS=()
+RULE_TAG=""
+if [[ -n "${LEAD_RULE}" ]]; then
+    RULE_ARGS=(--lead-rule "${LEAD_RULE}")
+    RULE_TAG="_${LEAD_RULE//,/-}"
+fi
+
+OUT_DIR="results/eval/${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}"
 mkdir -p "${OUT_DIR}"
 
 # 헤더 건너뜀, 빈 줄·# 줄 무시, Windows 줄바꿈 제거
@@ -55,12 +67,12 @@ tail -n +2 "${LIST}" | tr -d '\r' | grep -v '^[[:space:]]*$' | grep -v '^#' \
         continue
     fi
     roi="${x1},${y1},${x2},${y2},${x3},${y3},${x4},${y4}"
-    run_id="eval_${id}_${BACKEND}${CROP_TAG}${VARIANT_TAG}"
-    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG}${VARIANT_TAG} roi=${roi}"
+    run_id="eval_${id}_${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}"
+    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG} roi=${roi}"
 
     if ! ./build/apps/adas "${video}" --backend "${BACKEND}" --power-mode "${POWER_MODE}" \
             --deadline-ms 66.7 --run-id "${run_id}" --no-video --lane-roi "${roi}" \
-            "${CROP_ARGS[@]}" "${VARIANT_ARGS[@]}" \
+            "${CROP_ARGS[@]}" "${VARIANT_ARGS[@]}" "${RULE_ARGS[@]}" \
             > "${OUT_DIR}/${id}.log" 2>&1; then
         echo "[FAIL] ${id} (로그: ${OUT_DIR}/${id}.log)" >&2
         continue
