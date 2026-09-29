@@ -598,10 +598,7 @@ int main(int argc, char* argv[]) {
         const int activeLeadId = leadSelector.activeLeadId();
         const std::unordered_map<int, ObjectGeometry>& geometryById = leadSelector.geometryById();
 
-        cv::Mat overlay = frame.clone();
-        cv::fillConvexPoly(overlay, roadRoi, cv::Scalar(0, 255, 0));
-        cv::addWeighted(overlay, 0.10, frame, 0.90, 0.0, frame);
-        cv::polylines(frame, roadRoi, true, cv::Scalar(0, 180, 0), 2);
+        // 도로 ROI(초록)는 화면 비율 고정이라 영상마다 안 맞고 판정에도 안 쓰여서 그리지 않음 (9/30)
         cv::polylines(frame, egoLaneRoi, true, cv::Scalar(255, 255, 255), 3);
 
         int objectsOnRoad = 0, objectsInEgoLane = 0;
@@ -635,8 +632,7 @@ int main(int argc, char* argv[]) {
             }
 
             cv::Scalar boxColor;
-            if (!geometry.insideRoad) boxColor = cv::Scalar(0, 165, 255);
-            else if (!geometry.insideEgoLane) boxColor = cv::Scalar(255, 255, 0);
+            if (!geometry.insideEgoLane) boxColor = cv::Scalar(255, 255, 0);
             else if (!isLeadTarget) boxColor = cv::Scalar(255, 180, 0);
             else if (risk.level == RiskLevel::Danger) boxColor = cv::Scalar(0, 0, 255);
             else if (risk.level == RiskLevel::Caution) boxColor = cv::Scalar(0, 255, 255);
@@ -653,8 +649,6 @@ int main(int argc, char* argv[]) {
                 else label += " TTC-P:--";
             } else if (geometry.insideEgoLane) {
                 label += " EGO-LANE";
-            } else if (geometry.insideRoad) {
-                label += " SIDE";
             }
 
             int baseline = 0;
@@ -730,7 +724,7 @@ int main(int argc, char* argv[]) {
 
         koreanText.putText(frame, "프레임: " + std::to_string(processedFrames), cv::Point(30, 40), 25, cv::Scalar(255, 255, 255));
         koreanText.putText(frame, "추론 시간: " + std::string(cv::format("%.1f ms", inferenceMilliseconds)), cv::Point(30, 72), 25, cv::Scalar(255, 255, 255));
-        koreanText.putText(frame, "도로 객체: " + std::to_string(objectsOnRoad) + "  내 차선: " + std::to_string(objectsInEgoLane), cv::Point(30, 104), 25, cv::Scalar(255, 255, 255));
+        koreanText.putText(frame, "내 차선: " + std::to_string(objectsInEgoLane), cv::Point(30, 104), 25, cv::Scalar(255, 255, 255));
 
         std::string leadStatus = "선행 차량: 없음";
         if (activeLeadId >= 0 && leadRiskFound) {
