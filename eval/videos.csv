@@ -1,4 +1,4 @@
-id,type,group,should_warn,collision_frame,cf_status,x1,y1,x2,y2,x3,y3,x4,y4
+id,type,group,should_warn,collision_frame,cf_status,x1,y1,x2,y2,x3,y3,x4,y4,rx1,ry1,rx2,ry2,rx3,ry3,rx4,ry4,road_w_m,road_l_m,road_frame,road_res,bonnet_y,road_status,d0_m
 01_220328,2,normal,1,104,confirmed,932,590,1050,590,1858,1079,401,1079
 02_171101,2,normal,1,,none,854,520,941,520,1257,925,198,925
 03_130825,2,cutin,1,73,confirmed,788,590,898,590,1445,1079,76,1079
