@@ -1,6 +1,7 @@
 #pragma once
 
 #include "perception/Detection.hpp"
+#include "adas/RiskAnalyzer.hpp"
 
 #include <opencv2/core.hpp>
 #include <deque>
@@ -23,6 +24,11 @@ struct ObjectGeometry {
     // 박스 가로 폭 중 ego lane 안에 든 비율 (0~1). --lead-rule 의 overlap/passby/gate 중 하나라도 켰을 때만 계산되고
     // 아니면 0 으로 남음. WarningPolicy 의 gate 면제 판단에 씀
     float laneOverlap = 0.0F;
+
+    // bonnet: 보닛 반사 확정 트랙. 후보·분석 대상에서 빠지고 라벨 표시에만 씀
+    bool bonnetSuspect = false;
+    // hold/bonnet: 이번 프레임 관측이 비정상이라 마지막 정상 프레임의 기하를 재사용한 상태
+    bool held = false;
 };
 
 /*
@@ -32,6 +38,10 @@ struct ObjectGeometry {
  *   gap     : 트랙이 3프레임까지 안 보여도 lane 체류 카운터·횡이동 이력을 지우지 않음 (증가 없이 보존)
  *   passby  : passing-by 를 바깥쪽 횡이동 "그리고" 최근 8프레임 겹침 0.1 이상 감소로 판정
  *   gate    : 60% 위치 게이트를 DANGER && 겹침 50% 이상이면 면제 (WarningPolicy 에서 씀)
+ *   bonnet  : 보닛 반사 모양 박스(아래 변 ≥ 95%H, 위 변 ≥ 55%H, 폭÷높이 ≥ 2.5)를 첫 프레임부터 비정상 관측으로 보고
+ *             3프레임 넘게 이어지면 확정해 후보·분석에서 뺌. 정상 모양이 나오면 해제 (RiskAnalyzer 가 판정, 여기서는 후보 제외)
+ *   hold    : history 의 높이 급변을 리셋 대신 3프레임까지 보존. 보존 프레임은 샘플·체류·횡이동·겹침 이력을 동결하고
+ *             기존 LEAD 는 유지하되 새 후보로는 안 냄. 배너 카운터도 동결 (WarningPolicy). history 없이는 아무것도 안 함
  * 플래그마다 독립이라 하나씩 켜서 효과를 따로 볼 수 있음
  */
 struct LeadRuleFlags {
@@ -40,6 +50,8 @@ struct LeadRuleFlags {
     bool gap = false;
     bool passby = false;
     bool gate = false;
+    bool bonnet = false;
+    bool hold = false;
 };
 
 /*
@@ -60,7 +72,9 @@ public:
 
     // 한 프레임의 추적 결과로 기하 정보와 LEAD 선택을 갱신
     // analysisEnabled=false(장면 전환 워밍업)면 LEAD를 선택하지 않음
-    void update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled);
+    // observations: RiskAnalyzer::classifyObservations() 의 이번 프레임 판정. nullptr 이거나 비어 있으면 기존 동작
+    void update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled,
+                const std::unordered_map<int, ObservationState>* observations = nullptr);
 
     // 장면 전환 시 lane 체류/횡이동 이력과 LEAD 선택을 초기화
     void reset();
@@ -97,4 +111,6 @@ private:
     // gap: 트랙이 연속으로 안 보인 프레임 수. 3 을 넘으면 위 이력을 지움
     std::unordered_map<int, int> unseenFramesById_;
     std::unordered_map<int, ObjectGeometry> geometryById_;
+    // hold/bonnet: 트랙별 마지막 정상 프레임의 기하. held 프레임에 재사용함
+    std::unordered_map<int, ObjectGeometry> lastGeometryById_;
 };

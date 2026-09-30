@@ -79,7 +79,8 @@ RiskResult WarningPolicy::applyGeometryGate(const RiskResult& rawRisk, const Obj
  * 장면이 바뀌면 이전 경고 유지 카운터를 즉시 0으로 만들기 때문에,
  * 새 화면에 차량이 없는데 이전 장면의 경고가 남는 현상이 사라짐
  */
-void WarningPolicy::update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel) {
+void WarningPolicy::update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel,
+                           bool observationHeld) {
     if (!analysisEnabled || sceneChanged) {
         reset();
     } else if (leadRiskFound && activeLeadId >= 0) {
@@ -90,7 +91,11 @@ void WarningPolicy::update(bool analysisEnabled, bool sceneChanged, bool leadRis
             cautionCandidateFrames_ = 0; dangerCandidateFrames_ = 0;
         }
 
-        if (leadLevel == RiskLevel::Danger) {
+        if (observationHeld) {
+            // hold/bonnet 보존 프레임: 위험 관측 1회로 세지도, 연속을 끊지도 않음. 떠 있는 배너의 유지 시간만 줄어듦
+            if (dangerHoldRemaining_ > 0) --dangerHoldRemaining_;
+            if (cautionHoldRemaining_ > 0) --cautionHoldRemaining_;
+        } else if (leadLevel == RiskLevel::Danger) {
             ++dangerCandidateFrames_; cautionCandidateFrames_ = 0;
             if (dangerCandidateFrames_ >= dangerConfirmationFrames) { dangerHoldRemaining_ = warningHoldFrames_; cautionHoldRemaining_ = 0; }
         } else if (leadLevel == RiskLevel::Caution) {

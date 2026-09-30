@@ -24,7 +24,9 @@ public:
     RiskResult applyGeometryGate(const RiskResult& rawRisk, const ObjectGeometry& geometry, bool isLeadTarget) const;
 
     // 한 프레임의 LEAD 위험 상태로 배너 연속 확인/유지 카운터를 갱신
-    void update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel);
+    // observationHeld: hold/bonnet 보존 프레임. 카운터를 올리지도 지우지도 않음. 생략하면 기존 동작
+    void update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel,
+                bool observationHeld = false);
 
     // 장면 전환 시 이전 장면의 경고 상태를 즉시 제거
     void reset();

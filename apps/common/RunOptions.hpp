@@ -34,7 +34,7 @@
  *   --int8-shuffle-seed <n>    calibration 이미지 순서를 시드 n 으로 섞음. --int8-variant 와 같이 줘야 함
  *   --int8-fp32-head           검출 헤드(/model.22/) 층을 FP32 로 강제. --int8-variant 와 같이 줘야 함
  *   --lead-rule <목록>          LEAD 선택·경고 게이트 규칙 플래그. 쉼표로 이어 줌 (예: --lead-rule overlap,gap)
- *                              overlap | history | gap | passby | gate (뜻은 adas/LeadSelector.hpp 의 LeadRuleFlags 참고)
+ *                              overlap | history | gap | passby | gate | bonnet | hold (뜻은 adas/LeadSelector.hpp 의 LeadRuleFlags 참고)
  *                              생략하면 기존 규칙 그대로 (golden 보존). adas 전용, perception_demo 는 무시함
  */
 
@@ -64,7 +64,7 @@ struct RunOptions {
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
 inline const std::vector<std::string>& leadRuleNames() {
-    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate"};
+    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold"};
     return names;
 }
 
@@ -77,7 +77,7 @@ inline void printUsage(const std::string& programName) {
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
-              << " [--lead-rule overlap,history,gap,passby,gate]\n";
+              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -200,7 +200,7 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 }
                 const auto& names = leadRuleNames();
                 if (std::find(names.begin(), names.end(), token) == names.end()) {
-                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate)\n";
+                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold)\n";
                     return false;
                 }
                 if (std::find(options.leadRules.begin(), options.leadRules.end(), token) == options.leadRules.end()) {

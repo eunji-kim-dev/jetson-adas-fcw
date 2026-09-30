@@ -98,9 +98,11 @@ void LeadSelector::reset() {
     overlapHistoryById_.clear();
     unseenFramesById_.clear();
     geometryById_.clear();
+    lastGeometryById_.clear();
 }
 
-void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled) {
+void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled,
+                          const std::unordered_map<int, ObservationState>* observations) {
     // 이력의 frame 값. 절대 프레임 번호가 아니라 호출 횟수지만 간격 계산에는 충분함
     ++frameIndex_;
     geometryById_.clear();
@@ -119,6 +121,50 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
         // 겹침은 overlap·passby·gate 중 하나라도 켰을 때만 계산함 (기본 규칙은 접지점만 씀)
         const bool needOverlap = rules_.overlap || rules_.passby || rules_.gate;
         const LaneOverlap laneOverlap = needOverlap ? calculateLaneOverlap(egoLaneRoi_, box, groundPoint) : LaneOverlap{};
+
+        // hold/bonnet: RiskAnalyzer 의 이번 프레임 관측 판정
+        const ObservationState* observation = nullptr;
+        if (observations != nullptr) {
+            const auto observationIterator = observations->find(trackedObject.trackId);
+            if (observationIterator != observations->end()) observation = &observationIterator->second;
+        }
+        if (observation != nullptr && observation->bonnet) {
+            // 보닛 확정: 후보 불가. 쌓여 있던 체류·유예·횡이동·겹침 이력도 지움
+            // (실제 차 ID 가 보닛 박스로 옮겨 붙은 경우 옛 streak 로 바로 LEAD 가 되지 않게)
+            egoLaneStreakById_.erase(trackedObject.trackId);
+            egoLaneGraceById_.erase(trackedObject.trackId);
+            lateralHistoryById_.erase(trackedObject.trackId);
+            overlapHistoryById_.erase(trackedObject.trackId);
+            unseenFramesById_.erase(trackedObject.trackId);
+            lastGeometryById_.erase(trackedObject.trackId);
+            ObjectGeometry geometry;
+            geometry.groundPoint = groundPoint;
+            geometry.insideRoad = insideRoad;
+            geometry.bonnetSuspect = true;
+            geometryById_[trackedObject.trackId] = geometry;
+            continue;
+        }
+        if (observation != nullptr && observation->held) {
+            // 보존: 체류·유예·횡이동·겹침·미관측 이력을 전부 건드리지 않고 마지막 정상 프레임의 기하를 재사용함
+            // 기존 LEAD 는 점수를 그대로 등록해 유지하고, 새 LEAD 후보로는 내지 않음 (proposedLead 갱신 없음)
+            const auto previousGeometry = lastGeometryById_.find(trackedObject.trackId);
+            if (previousGeometry != lastGeometryById_.end()) {
+                ObjectGeometry geometry = previousGeometry->second;
+                geometry.held = true;
+                geometryById_[trackedObject.trackId] = geometry;
+                if (trackedObject.trackId == activeLeadId_ && std::isfinite(geometry.leadScore)) {
+                    leadScoreById[trackedObject.trackId] = geometry.leadScore;
+                }
+                continue;
+            }
+            // 정상 프레임이 한 번도 없던 트랙(보닛 모양으로 태어난 트랙 등)은 기하만 기록하고 후보로 안 봄
+            ObjectGeometry geometry;
+            geometry.groundPoint = groundPoint;
+            geometry.insideRoad = insideRoad;
+            geometry.held = true;
+            geometryById_[trackedObject.trackId] = geometry;
+            continue;
+        }
 
         // 새 LEAD 진입 조건은 엄격하게 유지하되,
         // 이미 lane 안에 있던 차량이 경계를 잠깐 넘는 경우 이력은 유예 기간 동안 보존
@@ -217,6 +263,8 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             }
         }
         geometryById_[trackedObject.trackId] = {groundPoint, insideRoad, lanePosition.inside, laneHeld, lanePosition.normalizedX, leadScore, passingBy, laneOverlap.ratio};
+        // hold/bonnet: 정상 관측 프레임의 기하를 다음 held 프레임용으로 남김
+        lastGeometryById_[trackedObject.trackId] = geometryById_[trackedObject.trackId];
     }
 
     // 이번 프레임에 보이지 않는 Track의 lane 체류/횡이동 이력은 제거
@@ -251,6 +299,10 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
     }
     for (auto iterator = unseenFramesById_.begin(); iterator != unseenFramesById_.end();) {
         if (shouldDropHistory(iterator->first)) iterator = unseenFramesById_.erase(iterator);
+        else ++iterator;
+    }
+    for (auto iterator = lastGeometryById_.begin(); iterator != lastGeometryById_.end();) {
+        if (shouldDropHistory(iterator->first)) iterator = lastGeometryById_.erase(iterator);
         else ++iterator;
     }
 

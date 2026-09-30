@@ -438,6 +438,8 @@ int main(int argc, char* argv[]) {
         else if (rule == "gap") leadRules.gap = true;
         else if (rule == "passby") leadRules.passby = true;
         else if (rule == "gate") leadRules.gate = true;
+        else if (rule == "bonnet") leadRules.bonnet = true;
+        else if (rule == "hold") leadRules.hold = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
     }
@@ -447,8 +449,8 @@ int main(int argc, char* argv[]) {
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
     LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps, leadRules);
     WarningPolicy warningPolicy(sourceFps, height, leadRules);
-    // history 규칙이면 연속 프레임 높이 40% 붕괴 시 이력 초기화를 켬
-    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60, leadRules.history ? 0.40F : 0.0F);
+    // history 규칙이면 연속 프레임 높이 40% 붕괴 시 이력 초기화를 켬. bonnet·hold 는 관측 분류(classifyObservations)를 켬
+    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60, leadRules.history ? 0.40F : 0.0F, leadRules.bonnet, leadRules.hold);
     /*
      * 장면 전환 직후에는 이전 장면의 추적과 TTC-P 이력이
      * 새 장면으로 이어지지 않도록 약 0.5초 동안 위험 분석을 쉼
@@ -594,7 +596,9 @@ int main(int argc, char* argv[]) {
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
         const auto trackingEnd = std::chrono::steady_clock::now();
 
-        leadSelector.update(trackedObjects, riskAnalysisEnabled);
+        // hold/bonnet: 관측 분류를 LEAD 선택보다 먼저 함. 두 규칙이 꺼져 있으면 빈 목록이라 기존 동작
+        riskAnalyzer.classifyObservations(trackedObjects, processedFrames);
+        leadSelector.update(trackedObjects, riskAnalysisEnabled, &riskAnalyzer.observationStates());
         const int activeLeadId = leadSelector.activeLeadId();
         const std::unordered_map<int, ObjectGeometry>& geometryById = leadSelector.geometryById();
 
@@ -619,7 +623,8 @@ int main(int argc, char* argv[]) {
             // history 규칙이면 lane 여부와 관계없이 차량 클래스 트랙 전부에 샘플을 쌓음
             // 후보가 돼야 이력이 시작되면 후보를 일찍 잡아도 샘플 10개를 또 기다림 (10번: 후보 85 → LEAD 92 → 샘플 부족)
             // 도로 ROI 로도 거르지 않음 — 10번 85 프레임 접지점 y=575 가 도로 ROI(64%) 밖이라
-            const bool isAnalysisTarget = riskAnalysisEnabled && isVehicleClass(trackedObject.classId) && (leadRules.history || geometry.laneHeld);
+            // bonnet 확정 트랙은 분석 대상에서도 뺌
+            const bool isAnalysisTarget = riskAnalysisEnabled && isVehicleClass(trackedObject.classId) && (leadRules.history || geometry.laneHeld) && !geometry.bonnetSuspect;
             const bool isLeadTarget = riskAnalysisEnabled && trackedObject.trackId == activeLeadId && geometry.laneHeld;
             
             const RiskResult rawRisk = riskAnalyzer.update(trackedObject, isAnalysisTarget, isLeadTarget, processedFrames);
@@ -649,7 +654,10 @@ int main(int argc, char* argv[]) {
                 else label += " TTC-P:--";
             } else if (geometry.insideEgoLane) {
                 label += " EGO-LANE";
+            } else if (geometry.bonnetSuspect) {
+                label += " BONNET";
             }
+            if (geometry.held) label += " HELD";
 
             int baseline = 0;
             const cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &baseline);
@@ -702,7 +710,7 @@ int main(int argc, char* argv[]) {
 
         riskAnalyzer.removeStaleTracks(processedFrames);
 
-        warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level);
+        warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level, leadRisk.observationHeld);
         // 이 프레임의 판정(경고 배너)이 확정된 순간
         const auto decisionTime = std::chrono::steady_clock::now();
 

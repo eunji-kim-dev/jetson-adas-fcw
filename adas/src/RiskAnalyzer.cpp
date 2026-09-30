@@ -1,5 +1,7 @@
 #include "adas/RiskAnalyzer.hpp"
 
+#include "perception/Classes.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -37,14 +39,24 @@ bool predictInverseHeight(const Samples& samples, double fps, int targetFrame, d
     return true;
 }
 
-} // namespace
+// --lead-rule bonnet: 보닛 반사 의심 모양 (실험값, 9/30 04·06·07 x86 영상으로 잡음). 셋 다 만족하면 보닛 모양
+// 실제 차의 범퍼만 잡힌 박스도 같은 모양이 될 수 있으므로 "의심"이고, 정상 모양이 한 번 나오면 바로 풀림
+constexpr float bonnetBottomRatio = 0.95F;    // 아래 변이 화면 높이의 95% 아래
+constexpr float bonnetTopRatio = 0.55F;       // 위 변도 화면 높이의 55% 아래 = 박스 전체가 화면 아래쪽
+constexpr float bonnetMinimumAspect = 2.5F;   // 폭 ÷ 높이. 04 ≈16, 06 ≈9, 07 ≈4.7
 
+// --lead-rule hold / bonnet: 비정상 관측을 이 프레임 수까지는 리셋하지 않고 보존함 (gap 의 3프레임과 같음)
+constexpr int holdLimitFrames = 3;
+
+} // namespace
 RiskAnalyzer::RiskAnalyzer(
     double fps,
     int frameHeight,
     int historySize,
     int staleFrameLimit,
-    float heightCollapseResetRatio
+    float heightCollapseResetRatio,
+    bool bonnetRule,
+    bool holdRule
 )
     : fps_(fps),
 
@@ -62,7 +74,9 @@ RiskAnalyzer::RiskAnalyzer(
       maximumHistoryGapFrames_(5),
 
       // 0 이면 끔. 음수는 0 으로 취급함
-      heightCollapseResetRatio_(std::max(heightCollapseResetRatio, 0.0F)) {
+      heightCollapseResetRatio_(std::max(heightCollapseResetRatio, 0.0F)),
+      bonnetRule_(bonnetRule),
+      holdRule_(holdRule) {
     if (fps_ <= 0.0) {
         throw std::invalid_argument("RiskAnalyzer FPS must be greater than zero.");
     }
@@ -164,6 +178,8 @@ void RiskAnalyzer::resetTrackHistory(TrackHistory& history) {
     // 절단 보정용 종횡비도 같이 버림
     // 이전 트랙 상태에서 재던 값을 새 관측에 이어 쓰면 등가 높이가 어긋남
     history.lastAspectRatio = 0.0F;
+
+    history.heldSamples.clear();
 }
 
 // 단계 판정만 SAFE로 되돌리고 샘플 이력은 그대로 둠
@@ -176,6 +192,107 @@ void RiskAnalyzer::clearLevelState(TrackHistory& history) {
 
     history.pendingFrames = 0;
     history.lowerLevelFrames = 0;
+}
+
+// hold/bonnet 공통: 절단 보정 높이. update() 의 계산과 같은 식 (종횡비는 마지막 비절단 프레임 값)
+float RiskAnalyzer::compensatedHeight(const TrackHistory& history, const cv::Rect& box) const {
+    const bool truncated = box.y + box.height >= frameHeight_ - 2;
+    if (truncated && history.lastAspectRatio > 1.0e-3F) {
+        return static_cast<float>(std::max(box.width, 1)) / history.lastAspectRatio;
+    }
+    return static_cast<float>(std::max(box.height, 1));
+}
+
+// history 규칙의 높이 급변 검사. 상태는 바꾸지 않음
+// update() 의 리셋 경로와 classifyObservations() 의 보존 경로가 같은 판정을 쓰도록 여기로 뺌
+//   감소: 40% 넘게 줄면 급변. 차가 0.33초(5프레임) 안에 1.7배 멀어지는 일은 없음
+//   증가: 이전 샘플의 1/h 를 시간에 선형으로 맞춰(등속 접근 모델) 예상 높이를 구하고, max(예상, 직전) 의 1.4배를 넘으면 급변
+//         boxHeight 는 절단 보정값이라 화면 높이보다 커지는 게 정상 → 예상에 화면 상한을 두지 않음
+//         예측 불가(예상 1/h ≤ 0, 샘플 2개 미만)면 증가로는 급변으로 안 봄 — 충돌 직전 급접근 이력을 지우지 않는 정책
+bool RiskAnalyzer::isHeightAnomaly(const TrackHistory& history, float boxHeight, int currentFrame) const {
+    if (heightCollapseResetRatio_ <= 0.0F || history.samples.empty()) return false;
+    const Sample& previous = history.samples.back();
+    if (currentFrame - previous.frameIndex < 1) return false;
+
+    const float previousHeight = std::max(previous.boxHeight, 1.0F);
+    if (boxHeight < previousHeight * (1.0F - heightCollapseResetRatio_)) return true;
+    if (boxHeight > previousHeight * (1.0F + heightCollapseResetRatio_)) {
+        double predictedInverseHeight = 0.0;
+        const bool predictionUsable =
+            predictInverseHeight(history.samples, fps_, currentFrame, predictedInverseHeight) &&
+            predictedInverseHeight > 1.0e-6;
+        if (predictionUsable) {
+            const float predictedHeight = static_cast<float>(1.0 / predictedInverseHeight);
+            // 멀어지던 추세(예상이 직전보다 작음)에서는 직전 관측을 기준으로 둠
+            const float expectedHeight = std::max(previousHeight, predictedHeight);
+            return boxHeight > expectedHeight * (1.0F + heightCollapseResetRatio_);
+        }
+    }
+    return false;
+}
+
+// bonnet: 보닛 반사 의심 모양. 아래 변이 화면 바닥에 닿고, 위 변까지 화면 아래쪽에 있고, 납작함
+bool RiskAnalyzer::isBonnetShape(const cv::Rect& box) const {
+    const float frameHeight = static_cast<float>(frameHeight_);
+    if (static_cast<float>(box.y + box.height) < frameHeight * bonnetBottomRatio) return false;
+    if (static_cast<float>(box.y) < frameHeight * bonnetTopRatio) return false;
+    const float aspect = static_cast<float>(box.width) / static_cast<float>(std::max(box.height, 1));
+    return aspect >= bonnetMinimumAspect;
+}
+
+// hold/bonnet: 이번 프레임 관측을 트랙마다 정상 / held / bonnet 확정 / reset 으로 분류함
+// 보닛 모양(bonnet)과 높이 급변(hold)을 같은 비정상 관측으로 보고 heldFrames 하나로 셈
+//   연속 holdLimitFrames 까지: held — 샘플을 안 넣고 단계·이력을 그대로 둠. LeadSelector 도 이 프레임은 이력을 동결함
+//   그 뒤: 보닛 모양이었으면 bonnet 확정, 아니면 reset
+//   정상 프레임이 한 번 나오면 카운터가 0 이 되고 확정도 풀림
+// 기존 트랙(LEAD 포함)의 박스가 보닛 모양으로 바뀌어도 첫 프레임부터 held 라 옛 streak 로 LEAD 가 되거나 샘플이 들어가는 일이 없음
+void RiskAnalyzer::classifyObservations(const std::vector<TrackedObject>& trackedObjects, int currentFrame) {
+    observationStates_.clear();
+    if (!bonnetRule_ && !holdRule_) return;
+
+    for (const TrackedObject& trackedObject : trackedObjects) {
+        if (!isVehicleClass(trackedObject.classId)) continue;
+        TrackHistory& history = histories_[trackedObject.trackId];
+
+        ObservationState state;
+        state.frame = currentFrame;
+        state.referenceBox = trackedObject.box;
+
+        const bool bonnetShape = bonnetRule_ && isBonnetShape(trackedObject.box);
+        bool anomalous = bonnetShape;
+        // 공백이 5프레임을 넘으면 update() 가 어차피 이력을 지우므로 급변 검사는 이어진 트랙에만 함
+        const bool continuous = history.lastSeenFrame >= 0 && currentFrame - history.lastSeenFrame <= maximumHistoryGapFrames_;
+        const float boxHeight = compensatedHeight(history, trackedObject.box);
+        if (!anomalous && holdRule_ && continuous) {
+            anomalous = isHeightAnomaly(history, boxHeight, currentFrame);
+        }
+
+        if (anomalous) {
+            ++history.heldFrames;
+            if (history.heldFrames <= holdLimitFrames) {
+                state.held = true;
+                if (history.hasLastGoodBox) state.referenceBox = history.lastGoodBox;
+                // 보존 프레임의 샘플을 따로 둠. 리셋으로 끝나면 이걸로 새 이력을 시작함 (update() 의 reset 경로)
+                const bool truncated = trackedObject.box.y + trackedObject.box.height >= frameHeight_ - 2;
+                const float groundY = truncated
+                    ? static_cast<float>(trackedObject.box.y) + boxHeight
+                    : static_cast<float>(trackedObject.box.y + trackedObject.box.height);
+                history.heldSamples.push_back({currentFrame, boxHeight, groundY});
+            } else if (bonnetShape) {
+                state.bonnet = true;
+            } else {
+                state.reset = true;
+            }
+        } else {
+            history.heldFrames = 0;
+            history.heldSamples.clear();
+            history.lastGoodBox = trackedObject.box;
+            history.hasLastGoodBox = true;
+        }
+
+        history.observation = state;
+        observationStates_[trackedObject.trackId] = state;
+    }
 }
 
 // rawLevel을 그대로 안 쓰고 몇 프레임 지켜본 다음 반영함
@@ -262,6 +379,33 @@ RiskResult RiskAnalyzer::update(
         return RiskResult{};
     }
 
+    // hold/bonnet: classifyObservations() 의 이번 프레임 판정을 따름
+    if ((bonnetRule_ || holdRule_) && history.observation.frame == currentFrame) {
+        const ObservationState& observation = history.observation;
+        if (observation.bonnet) {
+            // 보닛 확정: 분석 대상에서 빼고 이력을 지움 (LeadSelector 도 후보에서 뺌)
+            resetTrackHistory(history);
+            return RiskResult{};
+        }
+        if (observation.held) {
+            // 보존: 샘플을 안 넣고 직전 단계를 그대로 돌려줌. 안정화(stabilizeLevel)도 리셋도 안 거침
+            // DANGER 였으면 DANGER 그대로. 정상 복귀 프레임에서 원시 단계가 낮으면 기존 10프레임 강등이 작동함
+            if (!isLeadTarget) clearLevelState(history);
+            RiskResult result;
+            result.level = history.stableLevel;
+            result.sampleCount = static_cast<int>(history.samples.size());
+            result.observationHeld = true;
+            return result;
+        }
+        if (observation.reset) {
+            // 보존 한도를 넘긴 급변 = 변화가 계속되는 것. 보존했던 프레임의 샘플로 새 이력을 시작함
+            // (즉시 리셋하던 history 와 같은 시점에 샘플 10개가 차게. 08: 135 급변 → 이전은 144, 보존만 하면 147)
+            const std::vector<Sample> carried = history.heldSamples;
+            resetTrackHistory(history);
+            for (const Sample& sample : carried) history.samples.push_back(sample);
+        }
+    }
+
     const int rawBottom = trackedObject.box.y + trackedObject.box.height;
     const int rawWidth = std::max(trackedObject.box.width, 1);
     const int rawHeight = std::max(trackedObject.box.height, 1);
@@ -312,34 +456,12 @@ RiskResult RiskAnalyzer::update(
     // 짧은 공백(1~5프레임) 뒤 재등장한 프레임도 같은 기준으로 검사함 — 공백을 이어 쓰는 gap 규칙에서 재등장 프레임이 잘못된 박스가 섞이는 자리임
     // 5프레임 넘는 공백은 위 maximumHistoryGapFrames_ 에서 이미 초기화됨. 40% 는 큰 붕괴만 걸러내는 실험값임
     // 절단 보정용 종횡비는 이번 프레임 값으로 다시 채움
-    if (heightCollapseResetRatio_ > 0.0F && !history.samples.empty()) {
-        const Sample& previous = history.samples.back();
-        const int elapsedFrames = currentFrame - previous.frameIndex;
-        if (elapsedFrames >= 1) {
-            const float previousHeight = std::max(previous.boxHeight, 1.0F);
-            bool collapsed = false;
-            if (boxHeight < previousHeight * (1.0F - heightCollapseResetRatio_)) {
-                collapsed = true;
-            } else if (boxHeight > previousHeight * (1.0F + heightCollapseResetRatio_)) {
-                double predictedInverseHeight = 0.0;
-                const bool predictionUsable =
-                    predictInverseHeight(history.samples, fps_, currentFrame, predictedInverseHeight) &&
-                    predictedInverseHeight > 1.0e-6;
-                if (predictionUsable) {
-                    const float predictedHeight = static_cast<float>(1.0 / predictedInverseHeight);
-                    // 멀어지던 추세(예상이 직전보다 작음)에서는 직전 관측을 기준으로 둠
-                    const float expectedHeight = std::max(previousHeight, predictedHeight);
-                    collapsed = boxHeight > expectedHeight * (1.0F + heightCollapseResetRatio_);
-                }
-                // 예측 불가면 증가로는 초기화하지 않음 (위 주석의 정책)
-            }
-            if (collapsed) {
-                resetTrackHistory(history);
-                if (!truncated) {
-                    history.lastAspectRatio =
-                        static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
-                }
-            }
+    // 판정 자체는 isHeightAnomaly() 로 뺐음. hold 규칙이 켜져 있으면 classifyObservations() 가 이미 판정해서(보존/리셋) 여기서는 건너뜀
+    if (!holdRule_ && isHeightAnomaly(history, boxHeight, currentFrame)) {
+        resetTrackHistory(history);
+        if (!truncated) {
+            history.lastAspectRatio =
+                static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
         }
     }
 
@@ -510,6 +632,7 @@ void RiskAnalyzer::removeStaleTracks(int currentFrame) {
 // 컷 직전에 사라진 트랙 기록은 staleFrameLimit_까지 남아 있음
 void RiskAnalyzer::reset() {
     histories_.clear();
+    observationStates_.clear();
 }
 
 std::string RiskAnalyzer::toString(RiskLevel level) {
