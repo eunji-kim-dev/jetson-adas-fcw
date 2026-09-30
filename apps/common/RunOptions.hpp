@@ -17,6 +17,7 @@
  *   --measured-frames <n>      기본 0 = 끝까지, 아니면 warmup + n 프레임에서 정지
  *   --deadline-ms <ms>         기본 0 = 입력 영상 fps 에서 계산 (1000/fps), 주면 그 값으로 고정
  *   --no-video                 결과 영상을 쓰지 않음 (측정 run 용, 인코딩 부하와 디스크 I/O 제거)
+ *   --lead-select-log          LEAD 선정 근거 CSV (results/<id>_lead_select.csv). 골든 파일과 별개
  *   --lane-roi <8개 정수>       영상별 ego lane ROI 를 원본 픽셀 좌표로 지정 (TL,TR,BR,BL 순서, 콤마 구분)
  *                              예: --lane-roi 854,520,941,520,1257,925,198,925
  *                              생략하면 기존 화면 비율 ROI 를 그대로 씀 (golden 보존)
@@ -47,6 +48,7 @@ struct RunOptions {
     int measuredFrames = 0;
     double deadlineMs = 0.0;   // 0 이면 영상 fps 기준
     bool writeVideo = true;
+    bool leadSelectLog = false;   // --lead-select-log: 프레임·트랙별 LEAD 선정 근거를 results/<id>_lead_select.csv 에 씀
     std::vector<int> laneRoiPx;   // 비어 있으면 기본 비율 ROI, 아니면 8개 (x1,y1,...,x4,y4)
     std::string cropModelPath;    // 비어 있으면 crop 도 전체 프레임 모델을 씀
     int cropInputHeight = 0;      // --crop-input 의 H. 0 이면 미지정
@@ -64,7 +66,7 @@ struct RunOptions {
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
 inline const std::vector<std::string>& leadRuleNames() {
-    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold"};
+    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank"};
     return names;
 }
 
@@ -77,7 +79,7 @@ inline void printUsage(const std::string& programName) {
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
-              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold]\n";
+              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -141,6 +143,8 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             if (!takeDouble(i, argument, options.deadlineMs)) return false;
         } else if (argument == "--no-video") {
             options.writeVideo = false;
+        } else if (argument == "--lead-select-log") {
+            options.leadSelectLog = true;
         } else if (argument == "--lane-roi") {
             std::string text;
             if (!takeValue(i, argument, text)) return false;
@@ -200,7 +204,7 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 }
                 const auto& names = leadRuleNames();
                 if (std::find(names.begin(), names.end(), token) == names.end()) {
-                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold)\n";
+                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold,rank)\n";
                     return false;
                 }
                 if (std::find(options.leadRules.begin(), options.leadRules.end(), token) == options.leadRules.end()) {

@@ -278,6 +278,8 @@ int main(int argc, char* argv[]) {
     const std::string csvPath = "results/" + inputStem + "_frames.csv";
     // 경고 배너 기록용. 골든 MD5 대상인 _frames.csv 와 분리함
     const std::string bannerCsvPath = "results/" + inputStem + "_banner.csv";
+    // LEAD 선정 로그. --lead-select-log 일 때만 씀
+    const std::string leadSelectCsvPath = "results/" + inputStem + "_lead_select.csv";
 
     std::filesystem::create_directories("results");
 
@@ -389,6 +391,17 @@ int main(int argc, char* argv[]) {
     }
     bannerCsv << "frame,bannerLevel,activeLeadId,ttc\n";
 
+    // 프레임·차량 트랙별 LEAD 선정 근거. leadScore 가 비어 있으면 eligible=0 — laneCandidate·laneStreak 로 이유를 가름
+    std::ofstream leadSelectCsv;
+    if (options.leadSelectLog) {
+        leadSelectCsv.open(leadSelectCsvPath);
+        if (!leadSelectCsv.is_open()) {
+            std::cerr << "[ERROR] LEAD 선정 로그 생성 실패: " << leadSelectCsvPath << '\n';
+            return 1;
+        }
+        leadSelectCsv << "frame,trackId,classId,insideEgoLane,laneHeld,laneCandidate,laneStreak,requiredStreak,eligible,laneOverlap,groundX,groundY,passingBy,held,bonnet,rankPenalty,leadScore,isLead\n";
+    }
+
     // 넓은 도로 관심 영역
     // 실제 위험 판단은 아래 egoLaneRoi의 선행 차량 한 대에만 적용
     const std::vector<cv::Point> roadRoi = {
@@ -440,6 +453,7 @@ int main(int argc, char* argv[]) {
         else if (rule == "gate") leadRules.gate = true;
         else if (rule == "bonnet") leadRules.bonnet = true;
         else if (rule == "hold") leadRules.hold = true;
+        else if (rule == "rank") leadRules.rank = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
     }
@@ -630,6 +644,18 @@ int main(int argc, char* argv[]) {
             const RiskResult rawRisk = riskAnalyzer.update(trackedObject, isAnalysisTarget, isLeadTarget, processedFrames);
             
             const RiskResult risk = warningPolicy.applyGeometryGate(rawRisk, geometry, isLeadTarget);
+
+            if (leadSelectCsv.is_open() && isVehicleClass(trackedObject.classId)) {
+                leadSelectCsv << processedFrames << ',' << trackedObject.trackId << ',' << trackedObject.classId << ','
+                              << (geometry.insideEgoLane ? 1 : 0) << ',' << (geometry.laneHeld ? 1 : 0) << ','
+                              << (geometry.laneCandidate ? 1 : 0) << ',' << geometry.laneStreak << ',' << geometry.requiredStreak << ',' << (geometry.eligible ? 1 : 0) << ','
+                              << cv::format("%.3f", geometry.laneOverlap) << ','
+                              << geometry.groundPoint.x << ',' << geometry.groundPoint.y << ','
+                              << (geometry.passingBy ? 1 : 0) << ',' << (geometry.held ? 1 : 0) << ',' << (geometry.bonnetSuspect ? 1 : 0) << ','
+                              << cv::format("%.0f", geometry.rankPenalty) << ','
+                              << (std::isfinite(geometry.leadScore) ? cv::format("%.1f", geometry.leadScore) : std::string()) << ','
+                              << (trackedObject.trackId == activeLeadId ? 1 : 0) << '\n';
+            }
 
             if (isLeadTarget) {
                 leadRisk = risk;

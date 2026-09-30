@@ -29,6 +29,15 @@ struct ObjectGeometry {
     bool bonnetSuspect = false;
     // hold/bonnet: 이번 프레임 관측이 비정상이라 마지막 정상 프레임의 기하를 재사용한 상태
     bool held = false;
+
+    // rank: 겹침만으로 들어온 후보에 준 감점 (px). 접지점 lane 안 후보·규칙 꺼짐이면 0. 선정 로그용
+    float rankPenalty = 0.0F;
+
+    // ★ 선정 로그용. leadScore 가 비어 있을 때 "후보 밖"인지 "체류 부족"인지 가르기 위해 둠
+    bool laneCandidate = false;   // 이번 프레임 후보 조건(접지점 lane 안 또는 overlap 겹침) 통과
+    int laneStreak = 0;           // 후보 연속 체류 프레임 (gap·held 면 동결값)
+    int requiredStreak = 0;       // LEAD 자격에 필요한 체류 (컷인이면 짧음)
+    bool eligible = false;        // laneCandidate && 차량 클래스 && laneStreak >= requiredStreak
 };
 
 /*
@@ -42,8 +51,10 @@ struct ObjectGeometry {
  *             3프레임 넘게 이어지면 확정해 후보·분석에서 뺌. 정상 모양이 나오면 해제 (RiskAnalyzer 가 판정, 여기서는 후보 제외)
  *   hold    : history 의 높이 급변을 리셋 대신 3프레임까지 보존. 보존 프레임은 샘플·체류·횡이동·겹침 이력을 동결하고
  *             기존 LEAD 는 유지하되 새 후보로는 안 냄. 배너 카운터도 동결 (WarningPolicy). history 없이는 아무것도 안 함
- * 플래그마다 독립이라 하나씩 켜서 효과를 따로 볼 수 있음
+ *   rank    : 경쟁 후보 사이의 우선순위. 접지점이 lane 밖이고 겹침으로만 들어온 후보는 점수에서 (1 − 겹침비율) × 400 을 뺌
+ *             후보 진입은 그대로라 그 후보가 유일하면 여전히 LEAD 가 됨 (07 옆 밴·13 옆 버스가 접지점 y 만으로 lane 안 앞차를 이겼음)
  */
+
 struct LeadRuleFlags {
     bool overlap = false;
     bool history = false;
@@ -52,6 +63,7 @@ struct LeadRuleFlags {
     bool gate = false;
     bool bonnet = false;
     bool hold = false;
+    bool rank = false;
 };
 
 /*

@@ -24,6 +24,7 @@ constexpr float overlapKeepRatio = 0.10F;        // overlap: 이미 후보면 �
 constexpr int gapPreserveFrames = 3;             // gap: 이 프레임 수까지 미관측이어도 이력 보존
 constexpr std::size_t overlapHistorySize = 8;    // passby: 겹침 추세를 보는 창
 constexpr float passByOverlapDrop = 0.10F;       // passby: 창 안에서 겹침이 이만큼 줄어야 passing-by
+constexpr float rankOverlapPenalty = 400.0F;     // rank: 겹침만으로 들어온 후보 감점 = (1 − 겹침) × 이 값 (px). 9/30 07·13 x86 로그로 잡음
 
 struct LaneOverlap {
     bool valid = false;         // 박스 아래 변이 lane 사다리꼴 세로 범위 안에 있음
@@ -249,12 +250,21 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
         const bool cuttingIn = outwardDriftPerFrame < -maximumLateralDriftPerFrame;
         const int requiredStreak = cuttingIn ? cutInEligibilityFrames_ : leadEligibilityFrames_;
         float leadScore = -std::numeric_limits<float>::infinity();
+        float rankPenalty = 0.0F;
 
-        if (laneCandidate && isVehicleClass(trackedObject.classId) && laneStreak >= requiredStreak) {
+        // ★ 로그에 남기려고 이름을 붙임. 조건은 그대로
+        const bool eligible = laneCandidate && isVehicleClass(trackedObject.classId) && laneStreak >= requiredStreak;
+        if (eligible) {
             // 중앙 패널티 계산 때만 클램프함. lane 밖 후보는 경계값(0 또는 1)으로 계산돼 lane 안 차량보다 점수가 낮음
             const float normalizedX = lanePosition.inside ? lanePosition.normalizedX : std::clamp(laneOverlap.normalizedX, 0.0F, 1.0F);
             const float centerPenalty = std::abs(normalizedX - 0.5F) * 90.0F;
             leadScore = static_cast<float>(groundPoint.y) - centerPenalty;
+            // rank: 겹침만으로 들어온 후보(접지점 lane 밖)는 lane 에 든 만큼만 점수를 인정함
+            // 접지점 y 는 "가깝다"일 뿐 "내 경로에 있다"가 아니라서, 옆 차로의 가까운 차가 lane 안 앞차를 이겼음
+            if (rules_.rank && !lanePosition.inside) {
+                rankPenalty = (1.0F - std::clamp(laneOverlap.ratio, 0.0F, 1.0F)) * rankOverlapPenalty;
+                leadScore -= rankPenalty;
+            }
             leadScoreById[trackedObject.trackId] = leadScore;
 
             if (leadScore > proposedLeadScore) {
@@ -263,6 +273,14 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             }
         }
         geometryById_[trackedObject.trackId] = {groundPoint, insideRoad, lanePosition.inside, laneHeld, lanePosition.normalizedX, leadScore, passingBy, laneOverlap.ratio};
+        {
+            ObjectGeometry& geometry = geometryById_[trackedObject.trackId];
+            geometry.rankPenalty = rankPenalty;
+            geometry.laneCandidate = laneCandidate;   // ★
+            geometry.laneStreak = laneStreak;         // ★
+            geometry.requiredStreak = requiredStreak; // ★
+            geometry.eligible = eligible;             // ★
+        }
         // hold/bonnet: 정상 관측 프레임의 기하를 다음 held 프레임용으로 남김
         lastGeometryById_[trackedObject.trackId] = geometryById_[trackedObject.trackId];
     }
