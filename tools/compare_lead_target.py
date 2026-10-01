@@ -11,7 +11,7 @@ for spec in sys.argv[2:]:
         ban = load(os.path.join(out, f'{vid}_{tag}_banner.csv'))
         first_lead = next((int(r['frame']) for r in sel if r['trackId'] == target and r['isLead'] == '1'), None)
         first_danger_target = next((int(r['frame']) for r in ban if r['bannerLevel'] == 'DANGER' and r['activeLeadId'] == target), None)
-        wrong = [int(r['frame']) for r in ban if r['bannerLevel'] == 'DANGER' and r['activeLeadId'] != target and int(r['frame']) < collision]
+        wrong = [int(r['frame']) for r in ban if r['bannerLevel'] == 'DANGER' and r['activeLeadId'] not in (target, '-1') and int(r['frame']) < collision]
         segs = []
         for f in wrong:
             if segs and f == segs[-1][1] + 1: segs[-1][1] = f
