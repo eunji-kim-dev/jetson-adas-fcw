@@ -225,7 +225,7 @@ public:
                            thickness, cv::LINE_AA, false);
 #else
         cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, fontHeight / 24.0,
-                    color, std::max(thickness, 1), cv::LINE_AA);
+                    color, std::max(thickness, 2), cv::LINE_AA);
 #endif
     }
 
@@ -235,7 +235,7 @@ public:
         return renderer_->getTextSize(text, fontHeight, thickness, baseline);
 #else
         return cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, fontHeight / 24.0,
-                               std::max(thickness, 1), baseline);
+                               std::max(thickness, 2), baseline);
 #endif
     }
 
@@ -797,21 +797,52 @@ int main(int argc, char* argv[]) {
         // 장면 전환 직후의 위험 분석 대기 시간을 한 프레임 줄임
         if (sceneWarmupRemaining > 0) --sceneWarmupRemaining;
 
-        koreanText.putText(frame, "프레임: " + std::to_string(processedFrames), cv::Point(30, 40), 25, cv::Scalar(255, 255, 255));
-        koreanText.putText(frame, "추론 시간: " + std::string(cv::format("%.1f ms", inferenceMilliseconds)), cv::Point(30, 72), 25, cv::Scalar(255, 255, 255));
-        koreanText.putText(frame, "내 차선: " + std::to_string(objectsInEgoLane), cv::Point(30, 104), 25, cv::Scalar(255, 255, 255));
+        // 화면 글자. freetype 없는 빌드는 Hershey 글꼴이라 한글이 ? 로 나와서 영어로 씀
+        // (Jetson: OpenCV 4.8 에 freetype 모듈이 4.6 만 있어 끄고 빌드함, 9/13)
+#ifdef ADAS_HAS_FREETYPE
+        const bool hangulText = true;
+#else
+        const bool hangulText = false;
+#endif
+        auto pick = [&](const char* korean, const char* english) { return std::string(hangulText ? korean : english); };
 
-        std::string leadStatus = "선행 차량: 없음";
+        std::string leadStatus = pick("선행 차량: 없음", "Lead: none");
         if (activeLeadId >= 0 && leadRiskFound) {
-            leadStatus = "선행 차량 ID:" + std::to_string(activeLeadId) + "  상태: " + getRiskNameKorean(leadRisk.level);
-            if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) leadStatus += "  TTC-P:" + std::string(cv::format("%.1f초", leadRisk.ttcSeconds));
-            else leadStatus += "  TTC-P:--";
+            leadStatus = pick("선행 차량 ID:", "Lead ID:") + std::to_string(activeLeadId) + pick("  상태: ", "  State: ")
+                       + (hangulText ? getRiskNameKorean(leadRisk.level) : RiskAnalyzer::toString(leadRisk.level));
+            if (leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) {
+                leadStatus += "  TTC-P:" + (hangulText ? cv::format("%.1f초", leadRisk.ttcSeconds) : cv::format("%.1fs", leadRisk.ttcSeconds));
+            } else {
+                leadStatus += "  TTC-P:--";
+            }
         }
 
-        koreanText.putText(frame, leadStatus, cv::Point(30, 136), 25, cv::Scalar(255, 255, 255));
+        // 어느 백엔드·crop 구조로 돌린 영상인지 화면에 남김 (결과 영상 설명용)
+        const std::vector<std::string> statusLines = {
+            pick("프레임: ", "Frame: ") + std::to_string(processedFrames),
+            pick("추론 시간: ", "Detect: ") + cv::format("%.1f ms", inferenceMilliseconds),
+            pick("내 차선: ", "Ego lane: ") + std::to_string(objectsInEgoLane),
+            leadStatus,
+            "backend: " + backendName + "  crop: " + runMetadata.cropInput,
+        };
 
-        if (warningPolicy.bannerLevel() == RiskLevel::Danger) drawCenteredKoreanText(koreanText, frame, "위험: 충돌 가능성 높음", 58, 34, cv::Scalar(0, 0, 255));
-        else if (warningPolicy.bannerLevel() == RiskLevel::Caution) drawCenteredKoreanText(koreanText, frame, "주의: 선행 차량 접근 중", 58, 31, cv::Scalar(0, 255, 255));
+        // 밝은 하늘 위에서도 읽히게 글자 뒤를 어둡게 함. 판 크기는 가장 긴 줄에 맞춤
+        int panelWidth = 0;
+        for (const std::string& line : statusLines) {
+            int baseline = 0;
+            panelWidth = std::max(panelWidth, koreanText.getTextSize(line, 25, -1, &baseline).width);
+        }
+        // freetype 글자는 기준점 아래로, Hershey 글자는 기준점 위로 그려져서 판 위치를 다르게 둠
+        const int panelTop = hangulText ? 30 : 8;
+        const cv::Rect panelRect = cv::Rect(18, panelTop, panelWidth + 24, 32 * static_cast<int>(statusLines.size()) + 14) & cv::Rect(0, 0, width, height);
+        cv::Mat panel = frame(panelRect);
+        panel.convertTo(panel, -1, 0.45);
+        for (std::size_t k = 0; k < statusLines.size(); ++k) {
+            koreanText.putText(frame, statusLines[k], cv::Point(30, 40 + 32 * static_cast<int>(k)), 25, cv::Scalar(255, 255, 255));
+        }
+
+        if (warningPolicy.bannerLevel() == RiskLevel::Danger) drawCenteredKoreanText(koreanText, frame, pick("위험: 충돌 가능성 높음", "DANGER: collision risk"), 58, 34, cv::Scalar(0, 0, 255));
+        else if (warningPolicy.bannerLevel() == RiskLevel::Caution) drawCenteredKoreanText(koreanText, frame, pick("주의: 선행 차량 접근 중", "CAUTION: lead vehicle approaching"), 58, 31, cv::Scalar(0, 255, 255));
 
         
         auto sortedDetections = detections;

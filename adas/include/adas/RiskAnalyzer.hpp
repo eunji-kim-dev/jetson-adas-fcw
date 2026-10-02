@@ -75,6 +75,10 @@ public:
     void classifyObservations(const std::vector<TrackedObject>& trackedObjects, int currentFrame);
     const std::unordered_map<int, ObservationState>& observationStates() const { return observationStates_; }
 
+    // bonnet: 보닛 반사 의심 모양인지 (아래 변 ≥ 95%H, 위 변 ≥ 55%H, 폭÷높이 ≥ 2.5). 상태는 안 바꿈
+    // 결과 영상에서 보닛 박스를 안 그릴 때도 씀
+    bool isBonnetShape(const cv::Rect& box) const;
+
     RiskResult update(
         const TrackedObject& trackedObject,
         bool isAnalysisTarget,
@@ -137,7 +141,7 @@ private:
     // hold/bonnet 판정 보조. 상태는 바꾸지 않음
     float compensatedHeight(const TrackHistory& history, const cv::Rect& box) const;
     bool isHeightAnomaly(const TrackHistory& history, float boxHeight, int currentFrame) const;
-    
+
     // 샘플은 남기고 단계 판정 상태만 SAFE로 되돌림
     static void clearLevelState(
         TrackHistory& history
