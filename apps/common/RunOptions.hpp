@@ -18,6 +18,7 @@
  *   --deadline-ms <ms>         기본 0 = 입력 영상 fps 에서 계산 (1000/fps), 주면 그 값으로 고정
  *   --no-video                 결과 영상을 쓰지 않음 (측정 run 용, 인코딩 부하와 디스크 I/O 제거)
  *   --lead-select-log          LEAD 선정 근거 CSV (results/<id>_lead_select.csv). 골든 파일과 별개
+ *   --diag-log                 TTC-P·배너 판정 사슬 진단 CSV (results/<id>_diag.csv). 골든 파일과 별개
  *   --lane-roi <8개 정수>       영상별 ego lane ROI 를 원본 픽셀 좌표로 지정 (TL,TR,BR,BL 순서, 콤마 구분)
  *                              예: --lane-roi 854,520,941,520,1257,925,198,925
  *                              생략하면 기존 화면 비율 ROI 를 그대로 씀 (golden 보존)
@@ -49,6 +50,7 @@ struct RunOptions {
     double deadlineMs = 0.0;   // 0 이면 영상 fps 기준
     bool writeVideo = true;
     bool leadSelectLog = false;   // --lead-select-log: 프레임·트랙별 LEAD 선정 근거를 results/<id>_lead_select.csv 에 씀
+    bool diagLog = false;         // --diag-log: 프레임·트랙별 TTC-P·배너 판정 사슬을 results/<id>_diag.csv 에 씀
     std::vector<int> laneRoiPx;   // 비어 있으면 기본 비율 ROI, 아니면 8개 (x1,y1,...,x4,y4)
     std::string cropModelPath;    // 비어 있으면 crop 도 전체 프레임 모델을 씀
     int cropInputHeight = 0;      // --crop-input 의 H. 0 이면 미지정
@@ -74,7 +76,7 @@ inline void printUsage(const std::string& programName) {
     std::cerr << "사용법: " << programName
               << " [입력 영상 경로] [--backend NAME] [--run-id ID] [--power-mode MODE]"
               << " [--warmup-frames N] [--measured-frames N]"
-              << " [--deadline-ms MS] [--no-video] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
+              << " [--deadline-ms MS] [--no-video] [--diag-log] [--lane-roi x1,y1,x2,y2,x3,y3,x4,y4]"
               << " [--crop-model PATH --crop-input HxW]"
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
@@ -145,6 +147,8 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             options.writeVideo = false;
         } else if (argument == "--lead-select-log") {
             options.leadSelectLog = true;
+        } else if (argument == "--diag-log") {
+            options.diagLog = true;
         } else if (argument == "--lane-roi") {
             std::string text;
             if (!takeValue(i, argument, text)) return false;

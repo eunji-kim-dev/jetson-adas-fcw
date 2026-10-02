@@ -29,6 +29,18 @@ struct RiskResult {
     // hold/bonnet: 이번 프레임 관측이 비정상이라 샘플을 안 넣고 직전 단계를 그대로 돌려준 상태
     // WarningPolicy 는 이 프레임에서 배너 카운터를 올리지도 지우지도 않음
     bool observationHeld = false;
+
+    // --diag-log 진단용. 판정에는 안 씀
+    // rawLevel     : 안정화(stabilizeLevel) 전 이번 프레임 단계. LEAD 가 아닌 트랙도 "LEAD 였다면" 값을 채움
+    // boxHeight    : 샘플에 넣은 절단 보정 높이 (held 면 샘플에 안 넣은 이번 관측값). 0 이면 계산 안 함
+    // groundY      : 샘플에 넣은 접지점 y (절단이면 가상 접지점). 0 이면 계산 안 함
+    // aspectRatio  : 절단 보정에 쓰는 마지막 비절단 종횡비 (폭 ÷ 높이). 0 이면 아직 없음
+    // historyReset : 이번 프레임에 샘플을 지운 이유 (gap | not_target | bonnet | hold_limit | anomaly). 비어 있으면 안 지움
+    RiskLevel rawLevel = RiskLevel::Safe;
+    float boxHeight = 0.0F;
+    float groundY = 0.0F;
+    float aspectRatio = 0.0F;
+    const char* historyReset = "";
 };
 
 // --lead-rule hold / bonnet: classifyObservations() 가 트랙마다 내는 이번 프레임 관측 판정

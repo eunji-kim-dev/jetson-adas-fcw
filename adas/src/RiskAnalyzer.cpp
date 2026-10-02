@@ -363,9 +363,16 @@ RiskResult RiskAnalyzer::update(
     // trackId로 기록 꺼내옴, 처음 보는 ID면 기본값으로 새로 생김
     TrackHistory& history = histories_[trackedObject.trackId];
 
+    // --diag-log: 이번 프레임에 샘플을 지운 이유. 지울 샘플이 있었을 때만 적음 (판정에는 안 씀)
+    const char* resetReason = "";
+    auto noteReset = [&](const char* reason) {
+        if (!history.samples.empty()) resetReason = reason;
+    };
+
     // 같은 ID라도 검출 공백이 너무 길었으면 예전 움직임이랑 지금 움직임을 안 이어붙임
     if (history.lastSeenFrame >= 0 &&
         currentFrame - history.lastSeenFrame > maximumHistoryGapFrames_) {
+        noteReset("gap");
         resetTrackHistory(history);
     }
 
@@ -374,9 +381,12 @@ RiskResult RiskAnalyzer::update(
     // 분석 대상(ego lane 안의 차량)이 아니면 기록 자체를 버림
     // 차선 밖으로 나간 차량의 옛날 박스 변화를 나중에 이어 쓰면 TTC가 엉뚱하게 나옴
     if (!isAnalysisTarget) {
+        noteReset("not_target");
         resetTrackHistory(history);
 
-        return RiskResult{};
+        RiskResult result;
+        result.historyReset = resetReason;
+        return result;
     }
 
     // hold/bonnet: classifyObservations() 의 이번 프레임 판정을 따름
@@ -384,8 +394,11 @@ RiskResult RiskAnalyzer::update(
         const ObservationState& observation = history.observation;
         if (observation.bonnet) {
             // 보닛 확정: 분석 대상에서 빼고 이력을 지움 (LeadSelector 도 후보에서 뺌)
+            noteReset("bonnet");
             resetTrackHistory(history);
-            return RiskResult{};
+            RiskResult result;
+            result.historyReset = resetReason;
+            return result;
         }
         if (observation.held) {
             // 보존: 샘플을 안 넣고 직전 단계를 그대로 돌려줌. 안정화(stabilizeLevel)도 리셋도 안 거침
@@ -395,12 +408,17 @@ RiskResult RiskAnalyzer::update(
             result.level = history.stableLevel;
             result.sampleCount = static_cast<int>(history.samples.size());
             result.observationHeld = true;
+            // --diag-log: 샘플에 안 넣은 이번 관측의 보정 높이와 종횡비를 남김
+            result.boxHeight = compensatedHeight(history, trackedObject.box);
+            result.aspectRatio = history.lastAspectRatio;
+            result.historyReset = resetReason;
             return result;
         }
         if (observation.reset) {
             // 보존 한도를 넘긴 급변 = 변화가 계속되는 것. 보존했던 프레임의 샘플로 새 이력을 시작함
             // (즉시 리셋하던 history 와 같은 시점에 샘플 10개가 차게. 08: 135 급변 → 이전은 144, 보존만 하면 147)
             const std::vector<Sample> carried = history.heldSamples;
+            noteReset("hold_limit");
             resetTrackHistory(history);
             for (const Sample& sample : carried) history.samples.push_back(sample);
         }
@@ -458,6 +476,7 @@ RiskResult RiskAnalyzer::update(
     // 절단 보정용 종횡비는 이번 프레임 값으로 다시 채움
     // 판정 자체는 isHeightAnomaly() 로 뺐음. hold 규칙이 켜져 있으면 classifyObservations() 가 이미 판정해서(보존/리셋) 여기서는 건너뜀
     if (!holdRule_ && isHeightAnomaly(history, boxHeight, currentFrame)) {
+        noteReset("anomaly");
         resetTrackHistory(history);
         if (!truncated) {
             history.lastAspectRatio =
@@ -489,6 +508,11 @@ RiskResult RiskAnalyzer::update(
 
     result.sampleCount = static_cast<int>(history.samples.size());
     result.truncated = truncated;
+    // --diag-log 용 관측값 (판정에는 안 씀)
+    result.boxHeight = boxHeight;
+    result.groundY = groundY;
+    result.aspectRatio = history.lastAspectRatio;
+    result.historyReset = resetReason;
 
     // 새 단계가 아직 확정 안 됐어도 일단 지금 안정화된 단계를 기본값으로
     // (LEAD가 아니면 바로 위에서 SAFE로 되돌려놨음)
@@ -543,12 +567,7 @@ RiskResult RiskAnalyzer::update(
     result.groundSpeedPixelsPerSecond = groundSpeed;
     result.heightGrowthRatio = heightGrowthRatio;
 
-    // LEAD가 아니면 수치만 채워서 돌려주고 단계 판정은 여기서 끝
-    // stabilizeLevel을 돌려버리면 LEAD 아닌 동안 내부 단계가 몰래 올라가 있다가
-    // LEAD로 바뀌는 순간 승격 카운트 없이 경고가 튀어나옴
-    if (!isLeadTarget) {
-        return result;
-    }
+    // LEAD 가 아닌 트랙의 조기 반환은 아래 rawLevel 계산 뒤로 옮김 (--diag-log 용. 판정 결과는 같음)
 
     // 너무 작은(멀리 있는) 객체의 불안정한 변화율을 위험으로 오판하지 않기 위한
     // 최소 크기 조건에 쓸 현재 프레임 박스 높이
@@ -597,6 +616,16 @@ RiskResult RiskAnalyzer::update(
                ttcSeconds <= 5.0F) {
         // CAUTION은 DANGER보다 완화된 기준 (3% / 2.5px/s / 5초)
         rawLevel = RiskLevel::Caution;
+    }
+
+    // --diag-log 용 원시 단계. LEAD 가 아닌 트랙은 "LEAD 였다면" 값이고 판정에는 안 씀
+    result.rawLevel = rawLevel;
+
+    // LEAD가 아니면 수치만 채워서 돌려주고 단계 판정은 여기서 끝
+    // stabilizeLevel을 돌려버리면 LEAD 아닌 동안 내부 단계가 몰래 올라가 있다가
+    // LEAD로 바뀌는 순간 승격 카운트 없이 경고가 튀어나옴
+    if (!isLeadTarget) {
+        return result;
     }
 
     // 이번 프레임 rawLevel 그대로 안 쓰고 안정화된 값으로 반환

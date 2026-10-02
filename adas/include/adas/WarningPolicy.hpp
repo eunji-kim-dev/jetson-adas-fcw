@@ -34,6 +34,12 @@ public:
     // 현재 표시할 배너 단계 (Safe면 표시하지 않음)
     RiskLevel bannerLevel() const;
 
+    // --diag-log 용. 배너 연속 확인 카운터·유지 시간·카운터가 따라가는 LEAD 를 그대로 보여줌 (판정에는 안 씀)
+    int dangerCandidateFrames() const { return dangerCandidateFrames_; }
+    int cautionCandidateFrames() const { return cautionCandidateFrames_; }
+    int dangerHoldRemaining() const { return dangerHoldRemaining_; }
+    int warningCandidateLeadId() const { return warningCandidateLeadId_; }
+
 private:
     const int warningHoldFrames_;
     const int minimumLeadGroundYForWarning_;

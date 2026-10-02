@@ -51,3 +51,4 @@ models/*.calib
 results/int8_layers/
 results/lead_on*/
 results/*_lead_select.csv
+results/*_diag.csv

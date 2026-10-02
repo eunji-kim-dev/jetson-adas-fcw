@@ -280,6 +280,8 @@ int main(int argc, char* argv[]) {
     const std::string bannerCsvPath = "results/" + inputStem + "_banner.csv";
     // LEAD 선정 로그. --lead-select-log 일 때만 씀
     const std::string leadSelectCsvPath = "results/" + inputStem + "_lead_select.csv";
+    // TTC-P·배너 판정 사슬 진단 로그. --diag-log 일 때만 씀
+    const std::string diagCsvPath = "results/" + inputStem + "_diag.csv";
 
     std::filesystem::create_directories("results");
 
@@ -401,6 +403,35 @@ int main(int argc, char* argv[]) {
         }
         leadSelectCsv << "frame,trackId,classId,insideEgoLane,laneHeld,laneCandidate,laneStreak,requiredStreak,eligible,laneOverlap,groundX,groundY,passingBy,held,bonnet,rankPenalty,leadScore,isLead\n";
     }
+
+    // 프레임·차량 트랙별 TTC-P 판정 사슬
+    // 관측(박스·절단 보정) → 샘플·이력 리셋 → 지표 → 원시 단계 → 안정화 → 게이트 → 보존(held) → 배너 카운터 → 배너
+    std::ofstream diagCsv;
+    if (options.diagLog) {
+        diagCsv.open(diagCsvPath);
+        if (!diagCsv.is_open()) {
+            std::cerr << "[ERROR] 진단 로그 생성 실패: " << diagCsvPath << '\n';
+            return 1;
+        }
+        diagCsv << "frame,trackId,classId,x,y,w,rawHeight,boxHeight,aspect,truncated,groundY,sampleCount,historyReset,"
+                   "heightGrowthRatio,logHeightRate,groundSpeed,ttcP,rawLevel,stableLevel,gated,observationHeld,"
+                   "isAnalysisTarget,isLead,isLeadTarget,laneOverlap,passingBy,"
+                   "bannerLeadId,dangerCandidateFrames,cautionCandidateFrames,dangerHoldRemaining,banner\n";
+    }
+    // 한 프레임의 트랙 행을 모았다가, 시간 측정이 다 끝난 뒤 배너 열을 붙여 씀 (진단 로그가 측정 구간에 안 들어가게)
+    struct DiagTrackRow {
+        int trackId;
+        int classId;
+        cv::Rect box;
+        RiskResult rawRisk;
+        bool gated;
+        bool analysisTarget;
+        bool lead;
+        bool leadTarget;
+        float laneOverlap;
+        bool passingBy;
+    };
+    std::vector<DiagTrackRow> diagRows;
 
     // 넓은 도로 관심 영역
     // 실제 위험 판단은 아래 egoLaneRoi의 선행 차량 한 대에만 적용
@@ -622,6 +653,7 @@ int main(int argc, char* argv[]) {
         int objectsOnRoad = 0, objectsInEgoLane = 0;
         RiskResult leadRisk;
         bool leadRiskFound = false;
+        diagRows.clear();
 
         for (const TrackedObject& trackedObject : trackedObjects) {
             const auto geometryIterator = geometryById.find(trackedObject.trackId);
@@ -655,6 +687,12 @@ int main(int argc, char* argv[]) {
                               << cv::format("%.0f", geometry.rankPenalty) << ','
                               << (std::isfinite(geometry.leadScore) ? cv::format("%.1f", geometry.leadScore) : std::string()) << ','
                               << (trackedObject.trackId == activeLeadId ? 1 : 0) << '\n';
+            }
+
+            if (diagCsv.is_open() && isVehicleClass(trackedObject.classId)) {
+                diagRows.push_back({trackedObject.trackId, trackedObject.classId, trackedObject.box, rawRisk,
+                                    risk.level != rawRisk.level, isAnalysisTarget, trackedObject.trackId == activeLeadId,
+                                    isLeadTarget, geometry.laneOverlap, geometry.passingBy});
             }
 
             if (isLeadTarget) {
@@ -886,6 +924,31 @@ int main(int argc, char* argv[]) {
         record.sourceDrops = captured.droppedBySource;
         record.appDrops = captured.droppedByApp;
         runLogger.writeFrame(record);
+
+        // 진단 로그 — 실행 로그처럼 모든 시각을 잰 뒤에 씀. 배너 열은 이번 프레임 갱신이 끝난 값이라 같은 프레임 행에 똑같이 붙음
+        // 지표 열(heightGrowthRatio~ttcP, rawLevel)이 비어 있으면 그 프레임엔 계산 안 됨 (샘플 8개 미만·held·분석 대상 아님)
+        for (const DiagTrackRow& row : diagRows) {
+            const RiskResult& r = row.rawRisk;
+            const bool metricsComputed = !r.observationHeld && r.sampleCount >= 8;
+            diagCsv << processedFrames << ',' << row.trackId << ',' << row.classId << ','
+                    << row.box.x << ',' << row.box.y << ',' << row.box.width << ',' << row.box.height << ','
+                    << (r.boxHeight > 0.0F ? cv::format("%.1f", r.boxHeight) : std::string()) << ','
+                    << (r.aspectRatio > 0.0F ? cv::format("%.3f", r.aspectRatio) : std::string()) << ','
+                    << (row.box.y + row.box.height >= height - 2 ? 1 : 0) << ','
+                    << (r.groundY > 0.0F ? cv::format("%.1f", r.groundY) : std::string()) << ','
+                    << r.sampleCount << ',' << r.historyReset << ','
+                    << (metricsComputed ? cv::format("%.4f", r.heightGrowthRatio) : std::string()) << ','
+                    << (metricsComputed ? cv::format("%.4f", r.logHeightRatePerSecond) : std::string()) << ','
+                    << (metricsComputed ? cv::format("%.2f", r.groundSpeedPixelsPerSecond) : std::string()) << ','
+                    << (metricsComputed ? (std::isfinite(r.ttcSeconds) ? cv::format("%.3f", r.ttcSeconds) : std::string("inf")) : std::string()) << ','
+                    << (metricsComputed ? RiskAnalyzer::toString(r.rawLevel) : std::string()) << ','
+                    << RiskAnalyzer::toString(r.level) << ',' << (row.gated ? 1 : 0) << ',' << (r.observationHeld ? 1 : 0) << ','
+                    << (row.analysisTarget ? 1 : 0) << ',' << (row.lead ? 1 : 0) << ',' << (row.leadTarget ? 1 : 0) << ','
+                    << cv::format("%.3f", row.laneOverlap) << ',' << (row.passingBy ? 1 : 0) << ','
+                    << warningPolicy.warningCandidateLeadId() << ',' << warningPolicy.dangerCandidateFrames() << ','
+                    << warningPolicy.cautionCandidateFrames() << ',' << warningPolicy.dangerHoldRemaining() << ','
+                    << RiskAnalyzer::toString(warningPolicy.bannerLevel()) << '\n';
+        }
 
         // --measured-frames: warmup + 측정 프레임 수를 채우면 정지 (반복 측정용)
         if (options.measuredFrames > 0 && processedFrames >= options.warmupFrames + options.measuredFrames) break;
