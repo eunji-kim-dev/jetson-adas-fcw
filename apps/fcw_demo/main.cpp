@@ -700,6 +700,9 @@ int main(int argc, char* argv[]) {
                 leadRiskFound = true;
             }
 
+            // bonnet 규칙: 보닛 모양 박스(확정 전 보존 프레임 포함)는 결과 영상에 안 그림. LEAD 는 그대로 그림. 판정·CSV·로그에는 영향 없음
+            if (leadRules.bonnet && trackedObject.trackId != activeLeadId && riskAnalyzer.isBonnetShape(trackedObject.box)) continue;
+
             cv::Scalar boxColor;
             if (!geometry.insideEgoLane) boxColor = cv::Scalar(255, 255, 0);
             else if (!isLeadTarget) boxColor = cv::Scalar(255, 180, 0);

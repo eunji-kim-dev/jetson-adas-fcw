@@ -137,8 +137,7 @@ private:
     // hold/bonnet 판정 보조. 상태는 바꾸지 않음
     float compensatedHeight(const TrackHistory& history, const cv::Rect& box) const;
     bool isHeightAnomaly(const TrackHistory& history, float boxHeight, int currentFrame) const;
-    bool isBonnetShape(const cv::Rect& box) const;
-
+    
     // 샘플은 남기고 단계 판정 상태만 SAFE로 되돌림
     static void clearLevelState(
         TrackHistory& history
