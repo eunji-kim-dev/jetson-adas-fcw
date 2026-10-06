@@ -12,6 +12,7 @@ videos/*
 results/*.avi
 results/*.mp4
 results/*_frames.csv
+results/videos_negative/
 
 # 실행 로그 (raw_frame_log.csv / run_summary.json)
 results/runs/
@@ -37,9 +38,6 @@ results/benchmark_archives/
 models/*.engine
 results/*_banner.csv
 models/
-
-# 평가셋 실행 결과
-results/eval/
 
 # 평가셋 실행 결과
 results/eval/
