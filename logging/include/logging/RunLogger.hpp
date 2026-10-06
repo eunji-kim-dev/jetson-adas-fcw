@@ -39,6 +39,17 @@ struct RunMetadata {
     std::string cropInput;         // crop 추론 입력 크기 "HxW". 기본 "640x640"
     std::string laneRoi;           // "default" 또는 "x1,y1,...,x4,y4" (--lane-roi 픽셀 좌표)
     std::string leadRule;          // "none" 또는 "overlap,gap" 처럼 --lead-rule 목록 (adas). perception_demo 는 비움
+    // TTR-H 실험 (adas --ttc-mode). perception_demo 는 비움. proxy 면 노면 값은 빈 칸·null
+    std::string ttcMode;                       // "proxy" / "homography" / "both"
+    std::string roadPoints;                    // "x1,y1,...,x4,y4" (노면 4점)
+    std::optional<double> roadWidthM;          // 노면 사각형 폭 (m)
+    std::optional<double> roadLengthM;         // 노면 사각형 길이 (m)
+    std::optional<int> roadFrame;              // 노면 4점을 찍은 프레임
+    std::string roadResolution;                // 노면 4점을 찍은 해상도 "1920x1080"
+    std::optional<int> bonnetY;                // 보닛 선 y. null 이면 화면 맨 아래 줄 기준
+    std::string roadStatus;                    // "assumed" / "verified"
+    std::optional<double> d0M;                 // 예약 값 (계산에 안 씀)
+    std::optional<double> referenceDepthM;     // Z_c: 화면 가운데·보닛 선(없으면 맨 아래 줄)의 깊이 (m)
     int detectionInterval = 1;
     double confidenceThreshold = 0.0;
     double nmsThreshold = 0.0;
@@ -91,6 +102,13 @@ struct FrameRecord {
 
     std::int64_t sourceDrops = 0;          // 직전 구간에서 소스(카메라) 쪽이 놓친 프레임 수. 파일은 0
     std::int64_t appDrops = 0;             // 직전 구간에서 프로그램이 버린 프레임 수 (threaded 모드). sync 는 0
+
+    // TTR-H (adas --ttc-mode homography|both 일 때만, LEAD 기준). 값이 없으면 빈 칸
+    std::optional<double> distanceM;       // LEAD 접지점 깊이 Z_now (m). 접지점이 무효면 빈 칸
+    std::optional<double> ttrH;            // TTR-H 초 (게이트 뒤). 유효하지 않으면 빈 칸
+    std::optional<bool> hValid;            // TTR-H 계산 여부
+    std::optional<std::string> hLevel;     // H 단계 (게이트 뒤)
+    std::optional<std::string> pLevel;     // P 단계 (게이트 뒤, risk_state 와 같은 값). LEAD 없으면 빈 칸
 };
 
 /*
@@ -103,7 +121,7 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 6;   // v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
+    static constexpr int kSchemaVersion = 7;   // v7: ttc_mode·노면 4점 값·z_c_m 추가, raw_frame_log 에 distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

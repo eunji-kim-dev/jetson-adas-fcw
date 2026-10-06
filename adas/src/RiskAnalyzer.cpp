@@ -48,6 +48,23 @@ constexpr float bonnetMinimumAspect = 2.5F;   // 폭 ÷ 높이. 04 ≈16, 06 ≈
 // --lead-rule hold / bonnet: 비정상 관측을 이 프레임 수까지는 리셋하지 않고 보존함 (gap 의 3프레임과 같음)
 constexpr int holdLimitFrames = 3;
 
+// --lead-rule bottom: 아래 변 누락 판정 (07 86~89: 아래 변이 올라가 높이 182 → 146, 폭은 그대로)
+constexpr float bottomAspectJumpRatio = 0.15F;   // 폭÷높이가 마지막 정상 값의 1.15배를 넘으면 아래 변 누락으로 봄 (실험값)
+constexpr int bottomMissingLimitFrames = 5;
+// bottom: 윗변이 마지막 정상 높이의 10% 넘게 움직이면 아래 변 누락이 아니라 박스 위쪽이 바뀐 것(짐·지붕 포함/제외)으로 봄
+// 음성 세트 1_009(윗변 131px 이동)·6_014(64~79px 이동)의 오경보에서 잡음
+constexpr float bottomTopShiftRatio = 0.10F;
+
+// --ttc-mode homography|both: TTR-H 분기 (5-2 명세, 전부 실험값)
+constexpr std::size_t distanceSampleLimit = 15;      // 거리 샘플은 최근 15개
+constexpr double distanceWindowSeconds = 1.0;        // 그리고 1.0초 이내 (10fps 면 11개까지)
+constexpr std::size_t minimumDistanceSamples = 10;   // h_valid 에 필요한 거리 샘플 수 (박스 샘플과 따로 셈)
+constexpr double minimumDecreaseToResidual = 3.0;    // 창 안에서 줄어든 거리 ≥ 잔차 흔들림 × 3 (단위 없음)
+constexpr int bonnetMarginPixels = 4;                // 아래 변 ≥ bonnet_y − 4 면 접지점에서 뺌
+constexpr double boxHeightDropRatio = 0.85;          // 직전 유효 거리 샘플(1.0초 안)보다 박스 높이가 이 비율 밑으로 줄면 접지점에서 뺌 (아래 변 누락, 실험값)
+constexpr float ttrDangerSeconds = 2.5F;             // TTR-H ≤ 2.5초 → H-DANGER 후보 (TTC-P 의 2.5초와 같은 뜻 아님)
+constexpr float ttrCautionSeconds = 5.0F;            // TTR-H ≤ 5초 → H-CAUTION 후보
+
 } // namespace
 RiskAnalyzer::RiskAnalyzer(
     double fps,
@@ -56,7 +73,8 @@ RiskAnalyzer::RiskAnalyzer(
     int staleFrameLimit,
     float heightCollapseResetRatio,
     bool bonnetRule,
-    bool holdRule
+    bool holdRule,
+    bool bottomRule
 )
     : fps_(fps),
 
@@ -76,7 +94,8 @@ RiskAnalyzer::RiskAnalyzer(
       // 0 이면 끔. 음수는 0 으로 취급함
       heightCollapseResetRatio_(std::max(heightCollapseResetRatio, 0.0F)),
       bonnetRule_(bonnetRule),
-      holdRule_(holdRule) {
+      holdRule_(holdRule),
+      bottomRule_(bottomRule) {
     if (fps_ <= 0.0) {
         throw std::invalid_argument("RiskAnalyzer FPS must be greater than zero.");
     }
@@ -178,8 +197,15 @@ void RiskAnalyzer::resetTrackHistory(TrackHistory& history) {
     // 절단 보정용 종횡비도 같이 버림
     // 이전 트랙 상태에서 재던 값을 새 관측에 이어 쓰면 등가 높이가 어긋남
     history.lastAspectRatio = 0.0F;
+    history.lastAspectHeight = 0.0F;
+    history.bottomMissingFrames = 0;
+    history.lastAspectTop = 0.0F;
 
     history.heldSamples.clear();
+
+    // TTR-H 거리 샘플·안정화 상태도 같이 지움 (P 의 높이 붕괴 리셋·공백·분석 대상 이탈 때 같이 초기화, 5-2)
+    history.distanceSamples.clear();
+    history.homographyLevel = LevelState();
 }
 
 // 단계 판정만 SAFE로 되돌리고 샘플 이력은 그대로 둠
@@ -192,15 +218,35 @@ void RiskAnalyzer::clearLevelState(TrackHistory& history) {
 
     history.pendingFrames = 0;
     history.lowerLevelFrames = 0;
+
+    // TTR-H 단계도 같은 이유로 SAFE 로 되돌림 (거리 샘플은 둠)
+    history.homographyLevel = LevelState();
 }
 
-// hold/bonnet 공통: 절단 보정 높이. update() 의 계산과 같은 식 (종횡비는 마지막 비절단 프레임 값)
+// hold/bonnet 공통: 절단 보정 높이. update() 의 계산과 같은 식 (종횡비는 마지막 비절단·비누락 프레임 값)
+// bottom 규칙이면 아래 변 누락 프레임도 같은 식으로 보정함
 float RiskAnalyzer::compensatedHeight(const TrackHistory& history, const cv::Rect& box) const {
     const bool truncated = box.y + box.height >= frameHeight_ - 2;
-    if (truncated && history.lastAspectRatio > 1.0e-3F) {
+    if ((truncated || isBottomMissing(history, box)) && history.lastAspectRatio > 1.0e-3F) {
         return static_cast<float>(std::max(box.width, 1)) / history.lastAspectRatio;
     }
     return static_cast<float>(std::max(box.height, 1));
+}
+
+// bottom: 화면 안에서 아래 변만 놓친 박스. 절단 박스는 기존 절단 보정이 맡으므로 여기서는 false
+// 폭은 그대로인데 높이만 줄면 폭÷높이가 뛴다는 점을 씀. 차가 돌아서거나 멀어져 모양이 바뀌는 건 한 프레임에 15% 넘게 뛰지 않음
+// 높이가 마지막 정상 프레임보다 줄었을 때만 봄 — 박스가 옆으로 넓어져(옆 차와 겹침 등) 종횡비가 뛴 경우를 높이 누락으로 오인하지 않게
+// 보정이 한도(5프레임)를 넘겨 이어지면 진짜 모양 변화로 보고 그만둠 → update() 가 새 종횡비를 받아들임
+bool RiskAnalyzer::isBottomMissing(const TrackHistory& history, const cv::Rect& box) const {
+    if (!bottomRule_ || history.lastAspectRatio <= 1.0e-3F) return false;
+    if (box.y + box.height >= frameHeight_ - 2) return false;
+    if (history.bottomMissingFrames >= bottomMissingLimitFrames) return false;
+    if (!(static_cast<float>(box.height) < history.lastAspectHeight)) return false;
+    // 윗변이 크게 움직였으면 아래 변 누락이 아님 (위쪽이 줄어든 박스를 누락으로 보정하면 가상 접지점이 아래로 튐)
+    if (std::fabs(static_cast<float>(box.y) - history.lastAspectTop) >
+        history.lastAspectHeight * bottomTopShiftRatio) return false;
+    const float aspect = static_cast<float>(std::max(box.width, 1)) / static_cast<float>(std::max(box.height, 1));
+    return aspect > history.lastAspectRatio * (1.0F + bottomAspectJumpRatio);
 }
 
 // history 규칙의 높이 급변 검사. 상태는 바꾸지 않음
@@ -273,7 +319,9 @@ void RiskAnalyzer::classifyObservations(const std::vector<TrackedObject>& tracke
                 state.held = true;
                 if (history.hasLastGoodBox) state.referenceBox = history.lastGoodBox;
                 // 보존 프레임의 샘플을 따로 둠. 리셋으로 끝나면 이걸로 새 이력을 시작함 (update() 의 reset 경로)
-                const bool truncated = trackedObject.box.y + trackedObject.box.height >= frameHeight_ - 2;
+                // 절단·아래 변 누락 프레임은 update() 와 같이 가상 접지점을 씀
+                const bool truncated = trackedObject.box.y + trackedObject.box.height >= frameHeight_ - 2
+                    || isBottomMissing(history, trackedObject.box);
                 const float groundY = truncated
                     ? static_cast<float>(trackedObject.box.y) + boxHeight
                     : static_cast<float>(trackedObject.box.y + trackedObject.box.height);
@@ -412,6 +460,12 @@ RiskResult RiskAnalyzer::update(
             result.boxHeight = compensatedHeight(history, trackedObject.box);
             result.aspectRatio = history.lastAspectRatio;
             result.historyReset = resetReason;
+            // TTR-H: 보존 프레임은 거리 샘플도 안 넣고 H 단계도 그대로 둠 (P 와 같음)
+            if (homographyEnabled_) {
+                result.hState = "held";
+                result.hSampleCount = static_cast<int>(history.distanceSamples.size());
+                result.hLevel = history.homographyLevel.stableLevel;
+            }
             return result;
         }
         if (observation.reset) {
@@ -445,19 +499,28 @@ RiskResult RiskAnalyzer::update(
      */
     const bool truncated = rawBottom >= frameHeight_ - 2;
 
+    // bottom: 화면 안에서 아래 변만 놓친 프레임. 절단과 같은 식으로 보정하고, 종횡비 기준값은 갱신하지 않음
+    // 절단 보정과 마찬가지로 compensatedHeight() 와 같은 값이 나와야 함 (hold 의 급변 판정이 그 값을 씀)
+    const bool bottomMissing = !truncated && isBottomMissing(history, trackedObject.box);
+
     float boxHeight = static_cast<float>(rawHeight);
 
-    if (!truncated) {
+    if (!truncated && !bottomMissing) {
         history.lastAspectRatio =
             static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
+        history.lastAspectHeight = static_cast<float>(rawHeight);
+        history.lastAspectTop = static_cast<float>(trackedObject.box.y);
+        history.bottomMissingFrames = 0;
     } else if (history.lastAspectRatio > 1.0e-3F) {
         boxHeight = static_cast<float>(rawWidth) / history.lastAspectRatio;
+        if (bottomMissing) ++history.bottomMissingFrames;
     }
 
     // 박스 하단 y좌표. 차량이 화면 아래로 내려올수록 커짐
     // 절단된 상태면 실제 하단이 화면 밖이라 719 같은 값에 고정되니까,
     // 등가 높이로 가상 접지점을 만들어서 회귀 입력이 끊기지 않게 함
-    const float groundY = truncated
+    // 아래 변 누락 프레임도 같은 식으로 가상 접지점을 씀 (관측된 아래 변은 실제보다 위에 있음)
+    const float groundY = (truncated || bottomMissing)
         ? static_cast<float>(trackedObject.box.y) + boxHeight
         : static_cast<float>(rawBottom);
 
@@ -481,6 +544,8 @@ RiskResult RiskAnalyzer::update(
         if (!truncated) {
             history.lastAspectRatio =
                 static_cast<float>(rawWidth) / static_cast<float>(rawHeight);
+            history.lastAspectHeight = static_cast<float>(rawHeight);
+            history.lastAspectTop = static_cast<float>(trackedObject.box.y);
         }
     }
 
@@ -513,6 +578,12 @@ RiskResult RiskAnalyzer::update(
     result.groundY = groundY;
     result.aspectRatio = history.lastAspectRatio;
     result.historyReset = resetReason;
+
+    // TTR-H 분기 (--ttc-mode homography|both). P 의 샘플 8개 대기와 무관하게 거리 샘플을 쌓고 H 값만 채움
+    if (homographyEnabled_) {
+        // bottom 규칙의 아래 변 누락 프레임은 접지점이 실제보다 위라 절단과 같이 뺌 (h_state=excluded)
+        updateHomography(history, trackedObject.box, truncated || bottomMissing, isLeadTarget, currentFrame, result);
+    }
 
     // 새 단계가 아직 확정 안 됐어도 일단 지금 안정화된 단계를 기본값으로
     // (LEAD가 아니면 바로 위에서 SAFE로 되돌려놨음)
@@ -632,6 +703,207 @@ RiskResult RiskAnalyzer::update(
     result.level = stabilizeLevel(history, rawLevel);
 
     return result;
+}
+
+// --ttc-mode homography|both: 노면 변환표를 받아 TTR-H 분기를 켬
+void RiskAnalyzer::setRoadHomography(const RoadHomography& homography) {
+    roadHomography_ = homography;
+    homographyEnabled_ = true;
+}
+
+// TTR-H 안정화. stabilizeLevel 과 같은 규칙을 H 상태(LevelState)에 적용함
+// P 의 상태(TrackHistory 의 stableLevel 등)는 안 건드림 — both 에서도 H 를 끝까지 돌려야 H 첫 경고 프레임이 나옴
+RiskLevel RiskAnalyzer::stabilizeLevelState(LevelState& state, RiskLevel rawLevel) {
+    if (rawLevel == state.stableLevel) {
+        state.pendingLevel = rawLevel;
+        state.pendingFrames = 0;
+        state.lowerLevelFrames = 0;
+        return state.stableLevel;
+    }
+
+    const int rawValue = static_cast<int>(rawLevel);
+    const int stableValue = static_cast<int>(state.stableLevel);
+
+    // 올림: DANGER 2프레임, CAUTION 4프레임 연속
+    if (rawValue > stableValue) {
+        state.lowerLevelFrames = 0;
+        if (state.pendingLevel == rawLevel) {
+            ++state.pendingFrames;
+        } else {
+            state.pendingLevel = rawLevel;
+            state.pendingFrames = 1;
+        }
+        const int requiredFrames = rawLevel == RiskLevel::Danger ? 2 : 4;
+        if (state.pendingFrames >= requiredFrames) {
+            state.stableLevel = rawLevel;
+            state.pendingFrames = 0;
+        }
+        return state.stableLevel;
+    }
+
+    // 내림: DANGER 였으면 10프레임, CAUTION 이었으면 6프레임 낮은 값이 이어져야 내려감
+    state.pendingFrames = 0;
+    ++state.lowerLevelFrames;
+    const int requiredFrames = state.stableLevel == RiskLevel::Danger ? 10 : 6;
+    if (state.lowerLevelFrames >= requiredFrames) {
+        state.stableLevel = rawLevel;
+        state.pendingLevel = rawLevel;
+        state.lowerLevelFrames = 0;
+    }
+    return state.stableLevel;
+}
+
+/*
+ * TTR-H 분기 한 프레임 (--ttc-mode homography|both, 5-2 명세)
+ *
+ * TTR_H = (Z_now − Z_c) / (−v̂_Z)
+ *   화면 가운데 가시 노면 끝(보닛 선, 없으면 맨 아래 줄)을 기준으로 정한 도로 깊이 Z_c 에 도달하기까지의 시간. 충돌까지가 아님
+ *   Z_now : 이번 프레임 박스 아래 변 가운데를 H 로 바꾼 깊이 (관측값)
+ *   v̂_Z   : 거리 샘플(최근 15개·1.0초 이내)을 실제 시간 간격(프레임 번호 ÷ fps)으로 직선 맞춤한 기울기. 접근이면 음수
+ *
+ * h_valid 조건: 현재 접지점 유효(아래 변 누락 의심 아님 포함) / Z_now > Z_c / 거리 샘플 10개 이상 / 기울기 음수
+ *              / 창 안에서 줄어든 거리 ≥ 잔차 흔들림 × 3
+ * 최소 박스 높이(P 와 같은 식)는 아래 6 에서, 게이트·passing-by·배너는 main 에서 H 쪽 WarningPolicy 로 따로 적용함
+ * P 와 상태를 공유하지 않음. 샘플·단계는 TrackHistory 의 H 칸만 씀
+ */
+void RiskAnalyzer::updateHomography(TrackHistory& history, const cv::Rect& box, bool truncated, bool isLeadTarget,
+                                    int currentFrame, RiskResult& result) const {
+    const int bottom = box.y + box.height;
+
+    // 1. 이번 프레임 접지점. 아래 변이 화면 끝(truncated)이거나 보닛 선 4px 안이면 뺌
+    //    "접지점이 보인다"는 확인이 아님 — 그 위에 있어도 가려진 것일 수 있음 (10/2 07: 박스 아래 변이 차 아랫부분을 놓침)
+    const char* pointState = nullptr;
+    double depthM = 0.0;
+    const bool nearBonnet = roadHomography_.bonnetY() >= 0 && bottom >= roadHomography_.bonnetY() - bonnetMarginPixels;
+    if (truncated || nearBonnet) {
+        pointState = "excluded";
+    } else if (!roadHomography_.depthAt(box.x + box.width * 0.5, static_cast<double>(bottom), depthM)) {
+        pointState = "horizon";
+    }
+
+    // 2. 박스 아래 변 누락 (10/2 07 86~88: 아래 변이 약 90px 위로 올라가 거리가 실제보다 멀게 나옴)
+    //    직전 유효 거리 샘플보다 박스 높이가 15% 넘게 줄면 이번 접지점을 뺌 (bottom_drop)
+    //    한 프레임에 0.85배로 주는 건 실제로 멀어져서는 거의 안 나옴. 누락이 이어지는 동안은 계속 뺌
+    //    직전 유효 샘플이 1.0초(거리 샘플 창)보다 오래됐으면 비교하지 않고 받음 — 아래 3 에서 새로 쌓음
+    std::deque<DistanceSample>& samples = history.distanceSamples;
+    if (pointState == nullptr && !samples.empty() && samples.back().frameIndex != currentFrame &&
+        static_cast<double>(currentFrame - samples.back().frameIndex) / fps_ <= distanceWindowSeconds &&
+        static_cast<double>(box.height) < static_cast<double>(samples.back().boxHeight) * boxHeightDropRatio) {
+        pointState = "bottom_drop";
+    }
+
+    // 3. 유효하면 거리 샘플을 넣음. 마지막 유효 샘플에서 5프레임 넘게 끊겼으면 거리 샘플과 H 단계를 처음부터 다시 쌓음
+    if (pointState == nullptr) {
+        if (!samples.empty() && currentFrame - samples.back().frameIndex > maximumHistoryGapFrames_) {
+            samples.clear();
+            history.homographyLevel = LevelState();
+        }
+        // update() 가 같은 프레임에 두 번 불리는 경우 대비 — 덮어씀
+        if (!samples.empty() && samples.back().frameIndex == currentFrame) {
+            samples.back().depthM = depthM;
+            samples.back().boxHeight = box.height;
+        } else {
+            samples.push_back({currentFrame, depthM, box.height});
+        }
+        // 최근 15개 그리고 1.0초 이내만 둠. 방금 넣은 샘플은 시간 차 0 이라 안 빠짐
+        while (samples.size() > distanceSampleLimit ||
+               static_cast<double>(currentFrame - samples.front().frameIndex) / fps_ > distanceWindowSeconds) {
+            samples.pop_front();
+        }
+        result.hObserved = true;
+        result.distanceM = static_cast<float>(depthM);
+    }
+    result.hSampleCount = static_cast<int>(samples.size());
+
+    // 4. 거리 회귀: 기울기 v̂_Z (m/s) 와 잔차 흔들림 sqrt(Σr² / (n − 2)) (m)
+    double slope = 0.0;
+    double residual = 0.0;
+    if (samples.size() >= 2) {
+        const int firstFrame = samples.front().frameIndex;
+        const double count = static_cast<double>(samples.size());
+        double meanTime = 0.0;
+        double meanDepth = 0.0;
+        for (const DistanceSample& sample : samples) {
+            meanTime += static_cast<double>(sample.frameIndex - firstFrame) / fps_;
+            meanDepth += sample.depthM;
+        }
+        meanTime /= count;
+        meanDepth /= count;
+
+        double numerator = 0.0;
+        double denominator = 0.0;
+        for (const DistanceSample& sample : samples) {
+            const double timeDifference = static_cast<double>(sample.frameIndex - firstFrame) / fps_ - meanTime;
+            numerator += timeDifference * (sample.depthM - meanDepth);
+            denominator += timeDifference * timeDifference;
+        }
+        if (denominator > 1.0e-9) {
+            slope = numerator / denominator;
+            if (samples.size() >= 3) {
+                double squaredSum = 0.0;
+                for (const DistanceSample& sample : samples) {
+                    const double timeDifference = static_cast<double>(sample.frameIndex - firstFrame) / fps_ - meanTime;
+                    const double residualValue = sample.depthM - (meanDepth + slope * timeDifference);
+                    squaredSum += residualValue * residualValue;
+                }
+                residual = std::sqrt(squaredSum / (count - 2.0));
+            }
+        }
+    }
+    result.hSpeedMps = static_cast<float>(slope);
+    result.hResidualM = static_cast<float>(residual);
+
+    // 5. 상태. 위에서부터 처음 걸린 것
+    //    현재 접지점이 무효면 과거 샘플과 무관하게 h_valid=false
+    bool valid = false;
+    if (pointState != nullptr) {
+        result.hState = pointState;
+    } else if (depthM <= roadHomography_.referenceDepthM()) {
+        result.hState = "passed";
+    } else if (samples.size() < minimumDistanceSamples) {
+        result.hState = "few";
+    } else if (!(slope < 0.0)) {
+        result.hState = "receding";
+    } else {
+        // 창 안에서 회귀 직선이 줄어든 거리 = −기울기 × 창 길이(첫 샘플 ~ 마지막 샘플)
+        const double windowSeconds = static_cast<double>(samples.back().frameIndex - samples.front().frameIndex) / fps_;
+        const double decrease = -slope * windowSeconds;
+        if (decrease < minimumDecreaseToResidual * residual) {
+            result.hState = "noisy";
+        } else {
+            result.hState = "valid";
+            valid = true;
+        }
+    }
+    result.hValid = valid;
+    if (valid) {
+        result.ttrH = static_cast<float>((depthM - roadHomography_.referenceDepthM()) / (-slope));
+    }
+
+    // 6. 원시 H 단계. 최소 박스 높이는 P 와 같은 식 (max(36, round(영상 높이 × 0.05)))
+    //    H 는 절단 프레임을 빼므로 보정 높이 대신 박스 높이를 그대로 씀
+    const int minimumWarningHeight = std::max(36, static_cast<int>(std::round(frameHeight_ * 0.05)));
+    RiskLevel rawLevel = RiskLevel::Safe;
+    if (valid && box.height >= minimumWarningHeight) {
+        if (result.ttrH <= ttrDangerSeconds) {
+            rawLevel = RiskLevel::Danger;
+        } else if (result.ttrH <= ttrCautionSeconds) {
+            rawLevel = RiskLevel::Caution;
+        }
+    }
+    result.hRawLevel = rawLevel;
+
+    // 7. 안정화는 LEAD 만. LEAD 가 아니면 clearLevelState() 가 이미 H 단계를 SAFE 로 돌려놨고 hLevel 은 SAFE 그대로
+    if (!isLeadTarget) return;
+    if (valid) {
+        result.hLevel = stabilizeLevelState(history.homographyLevel, rawLevel);
+    } else {
+        // h_valid=false 거나 passed: 새 경고 후보 누적을 끊음 — 안정화 상태를 지우고 SAFE 로 내보냄 (WarningPolicy 카운터도 끊김)
+        // 확정 단계를 남겨 두면(멈춤이든 10프레임 내림이든) 배너 유지 4프레임이 먼저 끝나고, 다시 유효해질 때 남은 DANGER 가 나가 배너가 다시 뜸
+        // 이미 뜬 배너를 유지 시간 동안 보여 주는 건 WarningPolicy 그대로
+        history.homographyLevel = LevelState();
+        result.hLevel = RiskLevel::Safe;
+    }
 }
 
 // 오래 안 보인 트랙 기록 삭제

@@ -25,7 +25,8 @@ const char* const kCsvHeader =
     "preprocess_crop_ms,inference_crop_ms,postprocess_crop_ms,"
     "merge_ms,detect_ms,tracking_ms,decision_ms,total_processing_ms,output_ms,deadline_miss,"
     "detections,tracks,lead_id,lead_found,ttc_p,risk_state,warning_state,scene_changed,"
-    "source_drops,app_drops";
+    "source_drops,app_drops,"
+    "distance_m,ttr_h,h_valid,h_level,p_level";
 
 std::string jsonEscape(const std::string& text) {
     std::string out;
@@ -59,6 +60,11 @@ std::string jsonNumberOrNull(const std::optional<double>& value, int precision) 
 std::string jsonBoolOrNull(const std::optional<bool>& value) {
     if (!value.has_value()) return "null";
     return *value ? "true" : "false";
+}
+
+std::string jsonIntOrNull(const std::optional<int>& value) {
+    if (!value.has_value()) return "null";
+    return std::to_string(*value);
 }
 
 std::string nowUtcIso8601() {
@@ -134,7 +140,9 @@ void RunLogger::writeFrame(const FrameRecord& r) {
               << r.detections << ',' << r.tracks << ','
               << cell(r.leadId) << ',' << cell(r.leadFound) << ',' << cell(r.ttcP) << ','
               << cell(r.riskState) << ',' << cell(r.warningState) << ',' << cell(r.sceneChanged) << ','
-              << r.sourceDrops << ',' << r.appDrops
+              << r.sourceDrops << ',' << r.appDrops << ','
+              << cell(r.distanceM) << ',' << cell(r.ttrH) << ',' << cell(r.hValid) << ','
+              << cell(r.hLevel) << ',' << cell(r.pLevel)
               << '\n';
     ++framesProcessed_;
 }
@@ -188,6 +196,16 @@ void RunLogger::writeSummary() {
          << "  \"crop_input\": " << jsonString(m.cropInput) << ",\n"
          << "  \"lane_roi\": " << jsonString(m.laneRoi) << ",\n"
          << "  \"lead_rule\": " << jsonString(m.leadRule) << ",\n"
+         << "  \"ttc_mode\": " << jsonString(m.ttcMode) << ",\n"
+         << "  \"road_points\": " << jsonString(m.roadPoints) << ",\n"
+         << "  \"road_w_m\": " << jsonNumberOrNull(m.roadWidthM, 3) << ",\n"
+         << "  \"road_l_m\": " << jsonNumberOrNull(m.roadLengthM, 3) << ",\n"
+         << "  \"road_frame\": " << jsonIntOrNull(m.roadFrame) << ",\n"
+         << "  \"road_res\": " << jsonString(m.roadResolution) << ",\n"
+         << "  \"bonnet_y\": " << jsonIntOrNull(m.bonnetY) << ",\n"
+         << "  \"road_status\": " << jsonString(m.roadStatus) << ",\n"
+         << "  \"d0_m\": " << jsonNumberOrNull(m.d0M, 3) << ",\n"
+         << "  \"z_c_m\": " << jsonNumberOrNull(m.referenceDepthM, 3) << ",\n"
          << "  \"detection_interval\": " << m.detectionInterval << ",\n"
          << "  \"confidence_threshold\": " << formatDouble(m.confidenceThreshold, 3) << ",\n"
          << "  \"nms_threshold\": " << formatDouble(m.nmsThreshold, 3) << ",\n"

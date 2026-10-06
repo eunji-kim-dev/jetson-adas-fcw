@@ -6,12 +6,14 @@ Warning Miss / False Alarm / 경고 선행시간을 계산한다.
 사용법:
     python3 tools/evaluate_fcw.py results/eval/tensorrt_fp16
     python3 tools/evaluate_fcw.py results/eval/tensorrt_fp16 results/eval/tensorrt_fp16_crop288x640   # 두 구조 나란히
+    python3 tools/evaluate_fcw.py --ph results/eval/<...>_ttc-both   # TTR-H: 한 폴더의 P·H 배너를 나란히
 
 옵션:
     --videos PATH       정답표 (기본 eval/videos.csv)
     --warn-level LEVEL  경고로 볼 배너 단계 (기본 DANGER, CAUTION 을 주면 CAUTION 이상)
     --fps N             선행시간 계산용 fps. run_summary 에 source_fps 가 있으면 그 값을 우선 씀 (기본 15)
     --csv PATH          영상별 표를 CSV 로도 저장
+    --ph                배너 파일의 p_banner·h_banner 열로 폴더마다 [P]·[H] 두 줄을 만듦 (--ttc-mode homography|both 결과만)
 
 판정 규칙:
     - 경고 = 배너가 --warn-level 이상으로 뜬 것 (기본 DANGER)
@@ -55,12 +57,17 @@ def read_videos(path):
     return rows
 
 
-def read_banner(path):
-    """<id>_banner.csv → [(frame, level, lead_id, ttc_text), ...]"""
+def read_banner(path, column="bannerLevel"):
+    """<id>_banner.csv → [(frame, level, lead_id, ttc_text), ...]. column 은 배너 단계 열 (TTR-H: p_banner / h_banner)"""
     out = []
     with open(path, encoding="utf-8", newline="") as f:
-        for row in csv.DictReader(f):
-            out.append((int(row["frame"]), row["bannerLevel"].strip(), row.get("activeLeadId", ""), row.get("ttc", "")))
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return out   # 빈 파일은 경고 없음으로 봄 (예전과 같음)
+        if column not in reader.fieldnames:
+            sys.exit(f"[ERROR] {path} 에 {column} 열이 없음 (--ph 는 --ttc-mode homography|both 결과에만 씀)")
+        for row in reader:
+            out.append((int(row["frame"]), row[column].strip(), row.get("activeLeadId", ""), row.get("ttc", "")))
     return out
 
 
@@ -251,15 +258,25 @@ def main():
     parser.add_argument("--warn-level", default="DANGER", choices=["CAUTION", "DANGER"])
     parser.add_argument("--fps", type=float, default=15.0)
     parser.add_argument("--csv", default=None)
+    parser.add_argument("--ph", action="store_true", help="p_banner·h_banner 로 폴더마다 [P]·[H] 두 줄 (TTR-H 결과)")
     args = parser.parse_args()
 
     videos = read_videos(args.videos)
     warn_threshold = LEVEL_ORDER[args.warn_level]
 
+    # (표 이름, 폴더, 배너 열). --ph 면 한 폴더를 P·H 두 줄로 나눔
+    sources = []
+    for result_dir in args.result_dirs:
+        base = os.path.basename(os.path.normpath(result_dir))
+        if args.ph:
+            sources.append((f"{base}[P]", result_dir, "p_banner"))
+            sources.append((f"{base}[H]", result_dir, "h_banner"))
+        else:
+            sources.append((base, result_dir, "bannerLevel"))
+
     labels = []
     per_dir = {}
-    for result_dir in args.result_dirs:
-        label = os.path.basename(os.path.normpath(result_dir))
+    for label, result_dir, column in sources:
         labels.append(label)
         results = []
         for video in videos:
@@ -268,7 +285,7 @@ def main():
                 print(f"[WARN] 배너 파일 없음: {banner_path}", file=sys.stderr)
                 continue
             fps = read_source_fps(result_dir, video["id"], args.fps)
-            results.append(evaluate_video(video, read_banner(banner_path), fps, warn_threshold))
+            results.append(evaluate_video(video, read_banner(banner_path, column), fps, warn_threshold))
         per_dir[label] = results
 
     print(f"정답표 {args.videos} ({len(videos)}개), 경고 기준 = 배너 {args.warn_level} 이상\n")

@@ -12,6 +12,9 @@
 #   LEAD 규칙 플래그로 돌리려면 LEAD_RULE 에 쉼표 목록을 줌 (adas 의 --lead-rule)
 #     LEAD_RULE=overlap,history,gap,passby,gate CROP_MODEL=... CROP_INPUT=... bash scripts/run_eval_set.sh eval/videos.csv tensorrt_fp16
 #   결과는 results/eval/<backend>_crop<HxW>_<규칙을 - 로 이은 이름>/ 에 따로 모임 (예: ..._overlap-history-gap-passby-gate)
+#   TTR-H 실험은 TTC_MODE 에 homography 또는 both 를 줌 (adas 의 --ttc-mode). 노면 열(rx1..road_status, d0_m 열이 있으면 그것도)을 영상마다 넘김
+#     TTC_MODE=both LEAD_RULE=... CROP_MODEL=... CROP_INPUT=... bash scripts/run_eval_set.sh eval/videos.csv tensorrt_fp16
+#   결과는 폴더 이름 끝에 _ttc-homography / _ttc-both 를 붙여 따로 모임. 노면 4점이 없는 영상은 건너뜀
 set -euo pipefail
 
 LIST="${1:-eval/videos.csv}"
@@ -22,6 +25,7 @@ CROP_MODEL="${CROP_MODEL:-}"
 CROP_INPUT="${CROP_INPUT:-}"
 INT8_VARIANT="${INT8_VARIANT:-}"
 LEAD_RULE="${LEAD_RULE:-}"
+TTC_MODE="${TTC_MODE:-}"
 
 # crop 옵션은 짝으로만 씀. 결과 폴더·run_id 에 crop 크기를 붙여 640 결과와 안 섞이게 함
 CROP_ARGS=()
@@ -51,12 +55,23 @@ if [[ -n "${LEAD_RULE}" ]]; then
     RULE_TAG="_${LEAD_RULE//,/-}"
 fi
 
-OUT_DIR="results/eval/${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}"
+# TTR-H 모드: homography | both 면 폴더·run_id 에 _ttc-<모드> 를 붙임. 비우거나 proxy 면 기존 그대로
+TTC_TAG=""
+if [[ -n "${TTC_MODE}" && "${TTC_MODE}" != "proxy" ]]; then
+    if [[ "${TTC_MODE}" != "homography" && "${TTC_MODE}" != "both" ]]; then
+        echo "[ERROR] TTC_MODE 는 homography 또는 both 여야 함: ${TTC_MODE}" >&2
+        exit 2
+    fi
+    TTC_TAG="_ttc-${TTC_MODE}"
+fi
+
+OUT_DIR="results/eval/${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}${TTC_TAG}"
 mkdir -p "${OUT_DIR}"
 
 # 헤더 건너뜀, 빈 줄·# 줄 무시, Windows 줄바꿈 제거
 tail -n +2 "${LIST}" | tr -d '\r' | grep -v '^[[:space:]]*$' | grep -v '^#' \
-| while IFS=, read -r id type group should_warn collision_frame cf_status x1 y1 x2 y2 x3 y3 x4 y4 rest; do
+| while IFS=, read -r id type group should_warn collision_frame cf_status x1 y1 x2 y2 x3 y3 x4 y4 \
+        rx1 ry1 rx2 ry2 rx3 ry3 rx4 ry4 road_w road_l road_frame road_res bonnet_y road_status d0_m rest; do
     video="${VIDEO_DIR}/${id}.mp4"
     if [[ ! -f "${video}" ]]; then
         echo "[SKIP] 영상 없음: ${video}" >&2
@@ -67,12 +82,30 @@ tail -n +2 "${LIST}" | tr -d '\r' | grep -v '^[[:space:]]*$' | grep -v '^#' \
         continue
     fi
     roi="${x1},${y1},${x2},${y2},${x3},${y3},${x4},${y4}"
-    run_id="eval_${id}_${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}"
-    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG} roi=${roi}"
+
+    # TTR-H: 노면 4점·크기는 필수, 나머지(해상도·프레임·상태·보닛 선·d0)는 칸이 차 있을 때만 넘김
+    TTC_ARGS=()
+    if [[ -n "${TTC_TAG}" ]]; then
+        if [[ -z "${rx1}" || -z "${ry4}" || -z "${road_w}" || -z "${road_l}" ]]; then
+            echo "[SKIP] 노면 4점 없음: ${id}" >&2
+            continue
+        fi
+        TTC_ARGS=(--ttc-mode "${TTC_MODE}"
+                  --road-points "${rx1},${ry1},${rx2},${ry2},${rx3},${ry3},${rx4},${ry4}"
+                  --road-size "${road_w},${road_l}")
+        if [[ -n "${road_res}" ]]; then TTC_ARGS+=(--road-res "${road_res}"); fi
+        if [[ -n "${road_frame}" ]]; then TTC_ARGS+=(--road-frame "${road_frame}"); fi
+        if [[ -n "${road_status}" ]]; then TTC_ARGS+=(--road-status "${road_status}"); fi
+        if [[ -n "${bonnet_y}" ]]; then TTC_ARGS+=(--bonnet-y "${bonnet_y}"); fi
+        if [[ -n "${d0_m}" ]]; then TTC_ARGS+=(--d0-m "${d0_m}"); fi
+    fi
+
+    run_id="eval_${id}_${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}${TTC_TAG}"
+    echo "[RUN] ${id} backend=${BACKEND}${CROP_TAG}${VARIANT_TAG}${RULE_TAG}${TTC_TAG} roi=${roi}"
 
     if ! ./build/apps/adas "${video}" --backend "${BACKEND}" --power-mode "${POWER_MODE}" \
             --deadline-ms 66.7 --run-id "${run_id}" --no-video --lane-roi "${roi}" \
-            "${CROP_ARGS[@]}" "${VARIANT_ARGS[@]}" "${RULE_ARGS[@]}" \
+            "${CROP_ARGS[@]}" "${VARIANT_ARGS[@]}" "${RULE_ARGS[@]}" "${TTC_ARGS[@]}" \
             > "${OUT_DIR}/${id}.log" 2>&1; then
         echo "[FAIL] ${id} (로그: ${OUT_DIR}/${id}.log)" >&2
         continue

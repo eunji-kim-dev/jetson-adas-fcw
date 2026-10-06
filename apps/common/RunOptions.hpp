@@ -1,8 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -36,8 +39,18 @@
  *   --int8-shuffle-seed <n>    calibration 이미지 순서를 시드 n 으로 섞음. --int8-variant 와 같이 줘야 함
  *   --int8-fp32-head           검출 헤드(/model.22/) 층을 FP32 로 강제. --int8-variant 와 같이 줘야 함
  *   --lead-rule <목록>          LEAD 선택·경고 게이트 규칙 플래그. 쉼표로 이어 줌 (예: --lead-rule overlap,gap)
- *                              overlap | history | gap | passby | gate | bonnet | hold (뜻은 adas/LeadSelector.hpp 의 LeadRuleFlags 참고)
+ *                              overlap | history | gap | passby | gate | bonnet | hold | rank | bottom (뜻은 adas/LeadSelector.hpp 의 LeadRuleFlags 참고)
  *                              생략하면 기존 규칙 그대로 (golden 보존). adas 전용, perception_demo 는 무시함
+ *   --ttc-mode <모드>           proxy (기본, golden 보존) | homography | both. TTR-H 실험 (5-2). adas 전용, 영상 파일 입력만 (--camera·--threaded-capture 불가)
+ *                              homography: 배너를 TTR-H 분기로만 띄움 / both: P·H 를 합치지 않고 각각 기록, 배너는 P
+ *   --road-points <8개 숫자>    노면 4점 픽셀 좌표 (가까운 왼쪽, 가까운 오른쪽, 먼 오른쪽, 먼 왼쪽 순서의 x,y. videos.csv rx1..ry4)
+ *   --road-size <W>,<L>        노면 4점 사각형의 폭·길이 (m, 예: 3.5,10). TTR-H 시간에서는 약분됨
+ *   --road-res <W>x<H>         노면 4점을 찍은 해상도 (가로x세로, videos.csv road_res). 영상 크기와 다르면 실행을 막음
+ *   --bonnet-y <y>             보닛 선 y. 생략하면 화면 맨 아래 줄을 기준으로 씀
+ *   --road-frame <n>           노면 4점을 찍은 프레임 (기록용)
+ *   --road-status <글자>        assumed | verified (기록용)
+ *   --d0-m <m>                 범퍼~가시 노면 끝 여유 (예약 값, 계산에 안 씀. 기록용)
+ *                              --road-* · --bonnet-y · --d0-m 은 --ttc-mode homography|both 와 같이 줘야 함
  */
 
 struct RunOptions {
@@ -64,11 +77,22 @@ struct RunOptions {
     int int8ShuffleSeed = -1;     // 0 이상이면 calibration 순서 섞음
     bool int8Fp32Head = false;    // 헤드 FP32 강제
     std::vector<std::string> leadRules;  // --lead-rule 이름 목록. 비어 있으면 기존 규칙
+    // --ttc-mode homography|both (TTR-H 실험). proxy 면 아래 노면 값은 비어 있음
+    std::string ttcMode = "proxy";       // proxy | homography | both
+    std::vector<double> roadPointsPx;    // --road-points 8개 (P1..P4 의 x,y). 비어 있으면 없음
+    double roadWidthM = 0.0;             // --road-size 의 W (m). 0 이면 없음
+    double roadLengthM = 0.0;            // --road-size 의 L (m)
+    int roadResWidth = 0;                // --road-res 의 가로. 0 이면 없음
+    int roadResHeight = 0;               // --road-res 의 세로
+    std::optional<int> bonnetY;          // --bonnet-y. 없으면 화면 맨 아래 줄 기준
+    std::optional<int> roadFrame;        // --road-frame (기록용)
+    std::string roadStatus;              // --road-status (기록용)
+    std::optional<double> d0M;           // --d0-m (예약, 기록용)
 };
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
 inline const std::vector<std::string>& leadRuleNames() {
-    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank"};
+    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank", "bottom"};
     return names;
 }
 
@@ -81,7 +105,9 @@ inline void printUsage(const std::string& programName) {
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
-              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank]\n";
+              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom]"
+              << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
+              << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -99,7 +125,10 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         std::string text;
         if (!takeValue(i, option, text)) return false;
         try {
-            out = std::stoi(text);
+            // 뒤에 글자가 붙은 값(850abc)은 거부함. stoi 는 앞 숫자만 읽고 넘어감
+            std::size_t used = 0;
+            out = std::stoi(text, &used);
+            if (used != text.size()) throw std::invalid_argument(text);
         } catch (const std::exception&) {
             std::cerr << "[ERROR] " << option << " 값이 정수가 아님: " << text << '\n';
             return false;
@@ -115,7 +144,9 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         std::string text;
         if (!takeValue(i, option, text)) return false;
         try {
-            out = std::stod(text);
+            std::size_t used = 0;
+            out = std::stod(text, &used);
+            if (used != text.size() || !std::isfinite(out)) throw std::invalid_argument(text);
         } catch (const std::exception&) {
             std::cerr << "[ERROR] " << option << " 값이 숫자가 아님: " << text << '\n';
             return false;
@@ -126,6 +157,32 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         }
         return true;
     };    
+
+    // 콤마로 이은 숫자 목록. 개수가 다르거나 숫자가 아닌 칸(빈 칸·뒤에 글자 붙은 칸·nan·inf 포함)이 있으면 실패로 처리함
+    auto parseNumberList = [&](const std::string& option, const std::string& text, std::size_t expectedCount, std::vector<double>& out) {
+        std::vector<double> values;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t comma = text.find(',', start);
+            const std::string token = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            try {
+                std::size_t used = 0;
+                values.push_back(std::stod(token, &used));
+                if (used != token.size() || !std::isfinite(values.back())) throw std::invalid_argument(token);
+            } catch (const std::exception&) {
+                std::cerr << "[ERROR] " << option << " 값이 숫자가 아님: '" << token << "'\n";
+                return false;
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        if (values.size() != expectedCount) {
+            std::cerr << "[ERROR] " << option << " 는 숫자 " << expectedCount << "개여야 함, 받은 개수: " << values.size() << '\n';
+            return false;
+        }
+        out = values;
+        return true;
+    };  
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -208,7 +265,7 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 }
                 const auto& names = leadRuleNames();
                 if (std::find(names.begin(), names.end(), token) == names.end()) {
-                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold,rank)\n";
+                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold,rank,bottom)\n";
                     return false;
                 }
                 if (std::find(options.leadRules.begin(), options.leadRules.end(), token) == options.leadRules.end()) {
@@ -217,6 +274,69 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 if (comma == std::string::npos) break;
                 start = comma + 1;
             }
+        } else if (argument == "--ttc-mode") {
+            if (!takeValue(i, argument, options.ttcMode)) return false;
+            if (options.ttcMode != "proxy" && options.ttcMode != "homography" && options.ttcMode != "both") {
+                std::cerr << "[ERROR] --ttc-mode 는 proxy | homography | both: " << options.ttcMode << '\n';
+                return false;
+            }
+        } else if (argument == "--road-points") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            if (!parseNumberList(argument, text, 8, options.roadPointsPx)) return false;
+        } else if (argument == "--road-size") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            std::vector<double> size;
+            if (!parseNumberList(argument, text, 2, size)) return false;
+            if (!(size[0] > 0.0) || !(size[1] > 0.0)) {
+                std::cerr << "[ERROR] --road-size 값은 0 보다 커야 함: " << text << '\n';
+                return false;
+            }
+            options.roadWidthM = size[0];
+            options.roadLengthM = size[1];
+        } else if (argument == "--road-res") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            // "1920x1080" 처럼 가로x세로 (videos.csv road_res 그대로. --crop-input 의 세로x가로와 순서가 다름)
+            const std::size_t split = text.find('x');
+            try {
+                if (split == std::string::npos) throw std::invalid_argument(text);
+                const std::string widthText = text.substr(0, split);
+                const std::string heightText = text.substr(split + 1);
+                std::size_t widthUsed = 0;
+                std::size_t heightUsed = 0;
+                options.roadResWidth = std::stoi(widthText, &widthUsed);
+                options.roadResHeight = std::stoi(heightText, &heightUsed);
+                if (widthUsed != widthText.size() || heightUsed != heightText.size()) throw std::invalid_argument(text);
+            } catch (const std::exception&) {
+                std::cerr << "[ERROR] --road-res 는 WxH 형식이어야 함 (예: 1920x1080): " << text << '\n';
+                return false;
+            }
+            if (options.roadResWidth <= 0 || options.roadResHeight <= 0) {
+                std::cerr << "[ERROR] --road-res 값은 0 보다 커야 함: " << text << '\n';
+                return false;
+            }
+        } else if (argument == "--bonnet-y") {
+            int value = 0;
+            if (!takeInt(i, argument, value)) return false;
+            options.bonnetY = value;
+        } else if (argument == "--road-frame") {
+            int value = 0;
+            if (!takeInt(i, argument, value)) return false;
+            options.roadFrame = value;
+        } else if (argument == "--road-status") {
+            if (!takeValue(i, argument, options.roadStatus)) return false;
+        } else if (argument == "--d0-m") {
+            std::string text;
+            if (!takeValue(i, argument, text)) return false;
+            std::vector<double> value;
+            if (!parseNumberList(argument, text, 1, value)) return false;
+            if (value[0] < 0.0) {
+                std::cerr << "[ERROR] --d0-m 값은 0 이상이어야 함: " << text << '\n';
+                return false;
+            }
+            options.d0M = value[0];
         } else if (argument == "--crop-model") {
             if (!takeValue(i, argument, options.cropModelPath)) return false;
         } else if (argument == "--crop-input") {
@@ -261,6 +381,31 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
     if (hasInt8Experiment && options.int8Variant.empty()) {
         std::cerr << "[ERROR] --int8-calibrator / --int8-shuffle-seed / --int8-fp32-head 는 --int8-variant 이름과 같이 줘야 함 (정식 엔진 보호)\n";
         return false;
+    }
+    // TTR-H: homography|both 는 노면 4점·크기가 있어야 돎. proxy 에 노면 옵션을 주면 안 쓰이므로 막음 (TTR-H 없이 조용히 돌지 않게)
+    const bool hasRoadOption = !options.roadPointsPx.empty() || options.roadWidthM > 0.0 || options.roadResWidth > 0
+        || options.bonnetY.has_value() || options.roadFrame.has_value() || !options.roadStatus.empty() || options.d0M.has_value();
+    if (options.ttcMode == "proxy") {
+        if (hasRoadOption) {
+            std::cerr << "[ERROR] --road-* / --bonnet-y / --d0-m 는 --ttc-mode homography 또는 both 와 같이 줘야 함\n";
+            return false;
+        }
+    } else {
+        if (options.roadPointsPx.empty() || !(options.roadWidthM > 0.0)) {
+            std::cerr << "[ERROR] --ttc-mode " << options.ttcMode << " 는 --road-points 와 --road-size 가 있어야 함\n";
+            printUsage(programName);
+            return false;
+        }
+        // 거리 샘플 시간을 프레임 번호 ÷ fps 로 계산하므로 이번 실험은 영상 파일만 받음 (5-2)
+        if (!options.cameraDevice.empty()) {
+            std::cerr << "[ERROR] --ttc-mode " << options.ttcMode << " 는 카메라 입력을 지원하지 않음 (영상 파일만)\n";
+            return false;
+        }
+        // 캡처 스레드 분리는 최신 프레임 우선이라 영상 파일에서도 프레임을 건너뜀 → 프레임 번호 ÷ fps 시간이 어긋남
+        if (options.threadedCapture) {
+            std::cerr << "[ERROR] --ttc-mode " << options.ttcMode << " 는 --threaded-capture 와 같이 못 씀 (건너뛴 프레임 때문에 거리 샘플 시간이 어긋남)\n";
+            return false;
+        }
     }
     return true;
 }

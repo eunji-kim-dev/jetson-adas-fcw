@@ -29,6 +29,7 @@
 #include "adas/LeadSelector.hpp"
 #include "adas/WarningPolicy.hpp"
 #include "adas/RiskAnalyzer.hpp"
+#include "adas/RoadHomography.hpp"
 #include "logging/RunLogger.hpp"
 #include "RunOptions.hpp"
 #include "JetsonEnv.hpp"
@@ -39,6 +40,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -271,6 +273,9 @@ int main(int argc, char* argv[]) {
     const bool useCamera = !options.cameraDevice.empty();
     const std::string inputName = useCamera ? options.cameraDevice : options.inputPath;
     const std::string& backendName = options.backendName;
+    // --ttc-mode homography|both: TTR-H 분기를 돌림 (5-2). homography 면 화면 배너도 H. proxy 면 기존 그대로 (golden 보존)
+    const bool homographyMode = options.ttcMode != "proxy";
+    const bool homographyBanner = options.ttcMode == "homography";
 
     const std::string modelPath = "models/yolov8n.onnx";
     const std::string inputStem = std::filesystem::path(inputName).stem().string();
@@ -391,7 +396,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "[ERROR] 배너 CSV 생성 실패: " << bannerCsvPath << '\n';
         return 1;
     }
-    bannerCsv << "frame,bannerLevel,activeLeadId,ttc\n";
+    // TTR-H 모드면 P·H 를 나란히 붙임. bannerLevel 은 실제 화면 배너 (proxy·both = P, homography = H). proxy 는 기존 열 그대로
+    bannerCsv << "frame,bannerLevel,activeLeadId,ttc";
+    if (homographyMode) bannerCsv << ",p_banner,h_banner,ttc_p,ttr_h,h_state";
+    bannerCsv << '\n';
 
     // 프레임·차량 트랙별 LEAD 선정 근거. leadScore 가 비어 있으면 eligible=0 — laneCandidate·laneStreak 로 이유를 가름
     std::ofstream leadSelectCsv;
@@ -416,7 +424,13 @@ int main(int argc, char* argv[]) {
         diagCsv << "frame,trackId,classId,x,y,w,rawHeight,boxHeight,aspect,truncated,groundY,sampleCount,historyReset,"
                    "heightGrowthRatio,logHeightRate,groundSpeed,ttcP,rawLevel,stableLevel,gated,observationHeld,"
                    "isAnalysisTarget,isLead,isLeadTarget,laneOverlap,passingBy,"
-                   "bannerLeadId,dangerCandidateFrames,cautionCandidateFrames,dangerHoldRemaining,banner\n";
+                   "bannerLeadId,dangerCandidateFrames,cautionCandidateFrames,dangerHoldRemaining,banner";
+        // TTR-H 모드면 H 판정 사슬(거리 → 회귀 → 상태 → 원시 → 안정화 → 게이트 → H 배너 카운터 → H 배너)을 뒤에 붙임
+        if (homographyMode) {
+            diagCsv << ",distanceM,hSamples,hSpeedMps,hResidualM,ttrH,hState,hRawLevel,hLevel,hGated,"
+                       "hDangerCandidateFrames,hCautionCandidateFrames,hBanner";
+        }
+        diagCsv << '\n';
     }
     // 한 프레임의 트랙 행을 모았다가, 시간 측정이 다 끝난 뒤 배너 열을 붙여 씀 (진단 로그가 측정 구간에 안 들어가게)
     struct DiagTrackRow {
@@ -430,6 +444,7 @@ int main(int argc, char* argv[]) {
         bool leadTarget;
         float laneOverlap;
         bool passingBy;
+        bool homographyGated;   // TTR-H 모드: 게이트가 H 단계를 바꿈
     };
     std::vector<DiagTrackRow> diagRows;
 
@@ -485,17 +500,48 @@ int main(int argc, char* argv[]) {
         else if (rule == "bonnet") leadRules.bonnet = true;
         else if (rule == "hold") leadRules.hold = true;
         else if (rule == "rank") leadRules.rank = true;
+        else if (rule == "bottom") leadRules.bottom = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
     }
     if (leadRuleText.empty()) leadRuleText = "none";
     std::cout << "[INFO] LEAD 규칙: " << (options.leadRules.empty() ? "기본 (접지점 lane 안 후보, 60% 게이트)" : leadRuleText) << '\n';
 
+    // --ttc-mode homography|both: 노면 4점으로 변환표 H 를 만듦. 영상 크기와 안 맞거나 점이 틀리면 바로 종료함
+    RoadHomography roadHomography;
+    std::string roadPointsText;
+    if (homographyMode) {
+        if (options.roadResWidth > 0 && (options.roadResWidth != width || options.roadResHeight != height)) {
+            std::cerr << "[ERROR] --road-res " << options.roadResWidth << "x" << options.roadResHeight << " 가 영상 크기 "
+                      << width << "x" << height << " 와 다름 (노면 4점을 다른 해상도에서 찍음)\n";
+            return 1;
+        }
+        std::array<cv::Point2d, 4> roadPoints;
+        std::ostringstream roadPointsStream;
+        for (std::size_t k = 0; k < 8; ++k) {
+            if (k > 0) roadPointsStream << ',';
+            roadPointsStream << options.roadPointsPx[k];
+        }
+        for (std::size_t k = 0; k < 4; ++k) roadPoints[k] = cv::Point2d(options.roadPointsPx[2 * k], options.roadPointsPx[2 * k + 1]);
+        roadPointsText = roadPointsStream.str();
+        std::string roadError;
+        if (!RoadHomography::create(roadPoints, options.roadWidthM, options.roadLengthM, width, height, options.bonnetY.value_or(-1), roadHomography, roadError)) {
+            std::cerr << "[ERROR] 노면 변환표 생성 실패: " << roadError << '\n';
+            return 1;
+        }
+        std::cout << "[INFO] TTC 모드: " << options.ttcMode << " (노면 4점 " << roadPointsText << ", 기준 줄 y " << roadHomography.referenceRow()
+                  << ", Z_c " << cv::format("%.2f", roadHomography.referenceDepthM()) << " m, 배너 " << (homographyBanner ? "H" : "P") << ")\n";
+    }
+
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
     LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps, leadRules);
     WarningPolicy warningPolicy(sourceFps, height, leadRules);
     // history 규칙이면 연속 프레임 높이 40% 붕괴 시 이력 초기화를 켬. bonnet·hold 는 관측 분류(classifyObservations)를 켬
-    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60, leadRules.history ? 0.40F : 0.0F, leadRules.bonnet, leadRules.hold);
+    // bottom 은 화면 안 아래 변 누락 프레임의 높이 보정을 켬
+    RiskAnalyzer riskAnalyzer(sourceFps, height, 15, 60, leadRules.history ? 0.40F : 0.0F, leadRules.bonnet, leadRules.hold, leadRules.bottom);
+    // TTR-H: 분기를 켜고, 배너 카운터를 P 와 공유하지 않게 WarningPolicy 를 하나 더 둠 (규칙·게이트 설정은 같음)
+    if (homographyMode) riskAnalyzer.setRoadHomography(roadHomography);
+    WarningPolicy homographyWarningPolicy(sourceFps, height, leadRules);
     /*
      * 장면 전환 직후에는 이전 장면의 추적과 TTC-P 이력이
      * 새 장면으로 이어지지 않도록 약 0.5초 동안 위험 분석을 쉼
@@ -550,6 +596,19 @@ int main(int argc, char* argv[]) {
     }    
     // 어느 LEAD 규칙으로 나온 결과인지 run_summary 에 남김 (플래그별 효과 비교용)
     runMetadata.leadRule = leadRuleText;
+    // TTR-H 실험 조건. proxy 면 노면 값은 빈 칸·null
+    runMetadata.ttcMode = options.ttcMode;
+    if (homographyMode) {
+        runMetadata.roadPoints = roadPointsText;
+        runMetadata.roadWidthM = options.roadWidthM;
+        runMetadata.roadLengthM = options.roadLengthM;
+        runMetadata.roadFrame = options.roadFrame;
+        if (options.roadResWidth > 0) runMetadata.roadResolution = std::to_string(options.roadResWidth) + "x" + std::to_string(options.roadResHeight);
+        runMetadata.bonnetY = options.bonnetY;
+        runMetadata.roadStatus = options.roadStatus;
+        runMetadata.d0M = options.d0M;
+        runMetadata.referenceDepthM = roadHomography.referenceDepthM();
+    }
     runMetadata.detectionInterval = 1;
     runMetadata.confidenceThreshold = detectorThreshold;
     runMetadata.nmsThreshold = nmsThreshold;
@@ -652,6 +711,7 @@ int main(int argc, char* argv[]) {
 
         int objectsOnRoad = 0, objectsInEgoLane = 0;
         RiskResult leadRisk;
+        RiskResult leadHomographyRisk;   // TTR-H 모드: LEAD 의 H 단계(게이트 뒤). level·ttcSeconds 가 H 값
         bool leadRiskFound = false;
         diagRows.clear();
 
@@ -677,6 +737,16 @@ int main(int argc, char* argv[]) {
             
             const RiskResult risk = warningPolicy.applyGeometryGate(rawRisk, geometry, isLeadTarget);
 
+            // TTR-H: 같은 게이트·passing-by 를 H 단계에 따로 적용함. level·valid·ttcSeconds 칸에 H 값을 넣어 게이트를 통과시킴
+            RiskResult homographyRisk;
+            if (homographyMode) {
+                RiskResult homographyInput = rawRisk;
+                homographyInput.level = rawRisk.hLevel;
+                homographyInput.valid = rawRisk.hValid;
+                homographyInput.ttcSeconds = rawRisk.ttrH;
+                homographyRisk = homographyWarningPolicy.applyGeometryGate(homographyInput, geometry, isLeadTarget);
+            }
+
             if (leadSelectCsv.is_open() && isVehicleClass(trackedObject.classId)) {
                 leadSelectCsv << processedFrames << ',' << trackedObject.trackId << ',' << trackedObject.classId << ','
                               << (geometry.insideEgoLane ? 1 : 0) << ',' << (geometry.laneHeld ? 1 : 0) << ','
@@ -692,11 +762,13 @@ int main(int argc, char* argv[]) {
             if (diagCsv.is_open() && isVehicleClass(trackedObject.classId)) {
                 diagRows.push_back({trackedObject.trackId, trackedObject.classId, trackedObject.box, rawRisk,
                                     risk.level != rawRisk.level, isAnalysisTarget, trackedObject.trackId == activeLeadId,
-                                    isLeadTarget, geometry.laneOverlap, geometry.passingBy});
+                                    isLeadTarget, geometry.laneOverlap, geometry.passingBy,
+                                    homographyMode && homographyRisk.level != rawRisk.hLevel});
             }
 
             if (isLeadTarget) {
                 leadRisk = risk;
+                leadHomographyRisk = homographyRisk;
                 leadRiskFound = true;
             }
 
@@ -778,6 +850,12 @@ int main(int argc, char* argv[]) {
         riskAnalyzer.removeStaleTracks(processedFrames);
 
         warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level, leadRisk.observationHeld);
+        // TTR-H 배너. 카운터를 P 와 공유하지 않음. hold/bonnet 보존 프레임은 P 와 같이 카운터를 동결함
+        if (homographyMode) {
+            homographyWarningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadHomographyRisk.level, leadRisk.observationHeld);
+        }
+        // 화면 배너: homography 면 H, proxy·both 면 P
+        const RiskLevel screenBannerLevel = homographyBanner ? homographyWarningPolicy.bannerLevel() : warningPolicy.bannerLevel();
         // 이 프레임의 판정(경고 배너)이 확정된 순간
         const auto decisionTime = std::chrono::steady_clock::now();
 
@@ -818,13 +896,24 @@ int main(int argc, char* argv[]) {
         }
 
         // 어느 백엔드·crop 구조로 돌린 영상인지 화면에 남김 (결과 영상 설명용)
-        const std::vector<std::string> statusLines = {
+        std::vector<std::string> statusLines = {
             pick("프레임: ", "Frame: ") + std::to_string(processedFrames),
             pick("추론 시간: ", "Detect: ") + cv::format("%.1f ms", inferenceMilliseconds),
             pick("내 차선: ", "Ego lane: ") + std::to_string(objectsInEgoLane),
             leadStatus,
             "backend: " + backendName + "  crop: " + runMetadata.cropInput,
         };
+        // TTR-H 모드: LEAD 의 TTR-H(게이트 뒤)·H 단계·H 상태·접지점 깊이를 한 줄 더 씀
+        if (homographyMode) {
+            std::string ttrLine = "TTR-H: --";
+            if (activeLeadId >= 0 && leadRiskFound) {
+                const RiskResult& h = leadHomographyRisk;
+                ttrLine = "TTR-H: " + (std::isfinite(h.ttcSeconds) ? (hangulText ? cv::format("%.1f초", h.ttcSeconds) : cv::format("%.1fs", h.ttcSeconds)) : std::string("--"))
+                        + "  " + RiskAnalyzer::toString(h.level) + "  (" + (h.hState[0] != '\0' ? h.hState : "-") + ")";
+                if (h.hObserved) ttrLine += cv::format("  Z %.1fm", h.distanceM);
+            }
+            statusLines.push_back(ttrLine);
+        }
 
         // 밝은 하늘 위에서도 읽히게 글자 뒤를 어둡게 함. 판 크기는 가장 긴 줄에 맞춤
         int panelWidth = 0;
@@ -841,8 +930,10 @@ int main(int argc, char* argv[]) {
             koreanText.putText(frame, statusLines[k], cv::Point(30, 40 + 32 * static_cast<int>(k)), 25, cv::Scalar(255, 255, 255));
         }
 
-        if (warningPolicy.bannerLevel() == RiskLevel::Danger) drawCenteredKoreanText(koreanText, frame, pick("위험: 충돌 가능성 높음", "DANGER: collision risk"), 58, 34, cv::Scalar(0, 0, 255));
-        else if (warningPolicy.bannerLevel() == RiskLevel::Caution) drawCenteredKoreanText(koreanText, frame, pick("주의: 선행 차량 접근 중", "CAUTION: lead vehicle approaching"), 58, 31, cv::Scalar(0, 255, 255));
+        // homography 면 화면 배너가 TTR-H 분기에서 온 것임을 글자에 붙임 (proxy·both 는 기존 글자 그대로)
+        const std::string bannerSuffix = homographyBanner ? " [TTR-H]" : "";
+        if (screenBannerLevel == RiskLevel::Danger) drawCenteredKoreanText(koreanText, frame, pick("위험: 충돌 가능성 높음", "DANGER: collision risk") + bannerSuffix, 58, 34, cv::Scalar(0, 0, 255));
+        else if (screenBannerLevel == RiskLevel::Caution) drawCenteredKoreanText(koreanText, frame, pick("주의: 선행 차량 접근 중", "CAUTION: lead vehicle approaching") + bannerSuffix, 58, 31, cv::Scalar(0, 255, 255));
 
         
         auto sortedDetections = detections;
@@ -912,13 +1003,22 @@ int main(int argc, char* argv[]) {
             << ttcText
             << '\n';
 
-        // 배너 기록. ttcText 는 위에서 만든 값을 그대로 씀
+        // 배너 기록. ttcText 는 위에서 만든 값을 그대로 씀. bannerLevel 은 화면 배너 (homography 면 H)
         bannerCsv
             << processedFrames << ','
-            << RiskAnalyzer::toString(warningPolicy.bannerLevel()) << ','
+            << RiskAnalyzer::toString(screenBannerLevel) << ','
             << activeLeadId << ','
-            << ttcText
-            << '\n';
+            << ttcText;
+        // TTR-H 모드: P·H 배너, LEAD 의 TTC-P(= ttc)·TTR-H (둘 다 게이트 뒤, 없으면 inf), H 상태 (LEAD 없으면 빈 칸)
+        if (homographyMode) {
+            bannerCsv
+                << ',' << RiskAnalyzer::toString(warningPolicy.bannerLevel())
+                << ',' << RiskAnalyzer::toString(homographyWarningPolicy.bannerLevel())
+                << ',' << ttcText
+                << ',' << (leadRiskFound && std::isfinite(leadHomographyRisk.ttcSeconds) ? cv::format("%.3f", leadHomographyRisk.ttcSeconds) : std::string("inf"))
+                << ',' << (leadRiskFound ? leadHomographyRisk.hState : "");
+        }
+        bannerCsv << '\n';
 
         if (options.writeVideo) writer.write(frame);
         const auto outputEnd = std::chrono::steady_clock::now();
@@ -953,10 +1053,18 @@ int main(int argc, char* argv[]) {
         record.leadFound = leadRiskFound;
         if (leadRiskFound && leadRisk.valid && std::isfinite(leadRisk.ttcSeconds)) record.ttcP = leadRisk.ttcSeconds;
         record.riskState = riskLevel;
-        record.warningState = RiskAnalyzer::toString(warningPolicy.bannerLevel());
+        record.warningState = RiskAnalyzer::toString(screenBannerLevel);
         record.sceneChanged = sceneChanged;
         record.sourceDrops = captured.droppedBySource;
         record.appDrops = captured.droppedByApp;
+        // P 단계는 모든 모드에서, TTR-H 값은 homography·both 에서만 (LEAD 기준)
+        if (leadRiskFound) record.pLevel = riskLevel;
+        if (homographyMode && leadRiskFound) {
+            if (leadHomographyRisk.hObserved) record.distanceM = leadHomographyRisk.distanceM;
+            if (std::isfinite(leadHomographyRisk.ttcSeconds)) record.ttrH = leadHomographyRisk.ttcSeconds;
+            record.hValid = leadHomographyRisk.hValid;
+            record.hLevel = RiskAnalyzer::toString(leadHomographyRisk.level);
+        }
         runLogger.writeFrame(record);
 
         // 진단 로그 — 실행 로그처럼 모든 시각을 잰 뒤에 씀. 배너 열은 이번 프레임 갱신이 끝난 값이라 같은 프레임 행에 똑같이 붙음
@@ -981,7 +1089,22 @@ int main(int argc, char* argv[]) {
                     << cv::format("%.3f", row.laneOverlap) << ',' << (row.passingBy ? 1 : 0) << ','
                     << warningPolicy.warningCandidateLeadId() << ',' << warningPolicy.dangerCandidateFrames() << ','
                     << warningPolicy.cautionCandidateFrames() << ',' << warningPolicy.dangerHoldRemaining() << ','
-                    << RiskAnalyzer::toString(warningPolicy.bannerLevel()) << '\n';
+                    << RiskAnalyzer::toString(warningPolicy.bannerLevel());
+            // TTR-H 모드: H 열. 회귀 값·hRawLevel 은 이번 프레임 H 를 계산했을 때만 (held·분석 대상 아님이면 빈 칸)
+            if (homographyMode) {
+                const bool homographyComputed = r.hState[0] != '\0' && std::string(r.hState) != "held";
+                diagCsv << ',' << (r.hObserved ? cv::format("%.2f", r.distanceM) : std::string()) << ','
+                        << r.hSampleCount << ','
+                        << (homographyComputed && r.hSampleCount >= 2 ? cv::format("%.3f", r.hSpeedMps) : std::string()) << ','
+                        << (homographyComputed && r.hSampleCount >= 3 ? cv::format("%.3f", r.hResidualM) : std::string()) << ','
+                        << (r.hValid ? cv::format("%.3f", r.ttrH) : std::string()) << ','
+                        << r.hState << ','
+                        << (homographyComputed ? RiskAnalyzer::toString(r.hRawLevel) : std::string()) << ','
+                        << RiskAnalyzer::toString(r.hLevel) << ',' << (row.homographyGated ? 1 : 0) << ','
+                        << homographyWarningPolicy.dangerCandidateFrames() << ',' << homographyWarningPolicy.cautionCandidateFrames() << ','
+                        << RiskAnalyzer::toString(homographyWarningPolicy.bannerLevel());
+            }
+            diagCsv << '\n';
         }
 
         // --measured-frames: warmup + 측정 프레임 수를 채우면 정지 (반복 측정용)

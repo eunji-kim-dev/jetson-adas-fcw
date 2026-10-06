@@ -53,6 +53,9 @@ struct ObjectGeometry {
  *             기존 LEAD 는 유지하되 새 후보로는 안 냄. 배너 카운터도 동결 (WarningPolicy). history 없이는 아무것도 안 함
  *   rank    : 경쟁 후보 사이의 우선순위. 접지점이 lane 밖이고 겹침으로만 들어온 후보는 점수에서 (1 − 겹침비율) × 70 을 뺌
  *             후보 진입은 그대로라 그 후보가 유일하면 여전히 LEAD 가 됨 (07 옆 밴·13 옆 버스가 접지점 y 만으로 lane 안 앞차를 이겼음)
+ *   bottom  : 박스가 화면 안에서 아래 변만 놓친 프레임(높이가 직전 정상 프레임보다 줄고 폭÷높이는 15% 넘게 커짐)을 화면 아래 절단과 같이
+ *             폭 ÷ 종횡비로 높이를 보정해 TTC-P 이력을 이음. 5프레임 넘게 이어지면 새 모양으로 받아들임 (RiskAnalyzer 에서 씀)
+ *             (07 86~89 에서 트럭 아래 변이 올라가 이력이 오염되고, 돌아온 90 이 급변으로 잡혀 93 에 리셋 → 충돌 102 까지 배너 못 띄움)
  */
 
 struct LeadRuleFlags {
@@ -64,6 +67,7 @@ struct LeadRuleFlags {
     bool bonnet = false;
     bool hold = false;
     bool rank = false;
+    bool bottom = false;
 };
 
 /*
