@@ -24,7 +24,7 @@ constexpr float overlapKeepRatio = 0.10F;        // overlap: 이미 후보면 �
 constexpr int gapPreserveFrames = 3;             // gap: 이 프레임 수까지 미관측이어도 이력 보존
 constexpr std::size_t overlapHistorySize = 8;    // passby: 겹침 추세를 보는 창
 constexpr float passByOverlapDrop = 0.10F;       // passby: 창 안에서 겹침이 이만큼 줄어야 passing-by
-constexpr float rankOverlapPenalty = 400.0F;     // rank: 겹침만으로 들어온 후보 감점 = (1 − 겹침) × 이 값 (px). 9/30 07·13 x86 로그로 잡음
+constexpr float rankOverlapPenalty = 70.0F;      // rank: 겹침만으로 들어온 후보 감점 = (1 − 겹침) × 이 값 (px). 10/4 Jetson 21개 로그 재현으로 잡음 (16~115 에서 03 손해 없음·06 대상 경고. 400 은 03 이 5프레임 늦음)
 
 struct LaneOverlap {
     bool valid = false;         // 박스 아래 변이 lane 사다리꼴 세로 범위 안에 있음
