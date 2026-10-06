@@ -92,7 +92,7 @@ struct RunOptions {
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
 inline const std::vector<std::string>& leadRuleNames() {
-    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank", "bottom", "edge"};
+    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank", "bottom", "edge", "cropedge"};
     return names;
 }
 
@@ -105,7 +105,7 @@ inline void printUsage(const std::string& programName) {
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
-              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge]"
+              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge]"
               << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
               << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]\n";
 }
@@ -265,7 +265,7 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 }
                 const auto& names = leadRuleNames();
                 if (std::find(names.begin(), names.end(), token) == names.end()) {
-                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge)\n";
+                    std::cerr << "[ERROR] --lead-rule 에 모르는 이름: '" << token << "' (가능: overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge)\n";
                     return false;
                 }
                 if (std::find(options.leadRules.begin(), options.leadRules.end(), token) == options.leadRules.end()) {

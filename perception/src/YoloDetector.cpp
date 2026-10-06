@@ -116,10 +116,66 @@ std::vector<Detection> suppressContainedDuplicates(const std::vector<Detection>&
     return result;
 }
 
+/*
+ * cropedge: crop 창의 화면 안쪽 변에 닿은 crop 박스는 차가 창 밖으로 삐져나가 잘린 박스임
+ * 같은 차를 전체 프레임 추론이 창 밖까지 이어서 잡았으면 crop 박스를 버리고 전체 프레임 박스를 남김
+ *
+ * 안 버리면 확대 추론이라 confidence 가 높은 잘린 박스가 NMS 와 포함형 중복 제거에서 이겨 온전한 박스를 지움
+ * 08 야간 앞차는 윗변이 crop 윗변(y=410)에 잘린 박스와 온전한 박스가 번갈아 나와 높이가 들쭉날쭉했음
+ * 6_014 는 LEAD 194프레임 중 105프레임이 crop 윗변(y=471)에 잘린 박스였음
+ *
+ * 전체 프레임이 못 잡은 차(원거리 소형 차)는 그대로 둠. crop 의 원래 역할임
+ * 전체 박스가 추적 고신뢰 기준(0.25) 미만이면 바꾸지 않음. 낮은 점수 박스로 바꾸면 추적이 약해짐
+ */
+std::vector<Detection> dropCropEdgeDuplicates(const std::vector<Detection>& farDetections, const std::vector<Detection>& fullDetections,
+                                              const cv::Rect& cropRect, const cv::Size& frameSize) {
+    constexpr float minimumContainment = 0.70F;      // crop 박스가 전체 박스 안에 이 비율 이상 들어가야 같은 차로 봄
+    constexpr float minimumFullConfidence = 0.25F;   // MultiObjectTracker 의 고신뢰 기준과 같음
+    // 경계에 "닿음" 여유. YOLO 박스는 잘린 물체의 끝을 경계보다 조금 안쪽에 그리기도 함 (1_009: 윗변 471 대신 472~487)
+    const int margin = std::max(2, static_cast<int>(std::round(cropRect.height * 0.04F)));
+
+    // 화면 끝과 겹치는 crop 변은 잘림이 아니라 화면 끝이라 검사하지 않음
+    const bool topInside = cropRect.y > 0;
+    const bool bottomInside = cropRect.y + cropRect.height < frameSize.height;
+    const bool leftInside = cropRect.x > 0;
+    const bool rightInside = cropRect.x + cropRect.width < frameSize.width;
+
+    std::vector<Detection> kept;
+    kept.reserve(farDetections.size());
+    for (const Detection& far : farDetections) {
+        const cv::Rect& box = far.box;
+        const bool touchTop = topInside && box.y <= cropRect.y + margin;
+        const bool touchBottom = bottomInside && box.y + box.height >= cropRect.y + cropRect.height - margin;
+        const bool touchLeft = leftInside && box.x <= cropRect.x + margin;
+        const bool touchRight = rightInside && box.x + box.width >= cropRect.x + cropRect.width - margin;
+
+        bool replaced = false;
+        if (touchTop || touchBottom || touchLeft || touchRight) {
+            for (const Detection& full : fullDetections) {
+                if (full.confidence < minimumFullConfidence) continue;
+                if (getNmsGroup(full.classId) != getNmsGroup(far.classId)) continue;
+                if (calculateContainment(box, full.box) < minimumContainment) continue;
+                // 닿은 변 쪽으로 전체 박스가 crop 창 밖까지 이어져 있어야 잘린 박스로 봄
+                const bool beyond = (touchTop && full.box.y < cropRect.y)
+                    || (touchBottom && full.box.y + full.box.height > cropRect.y + cropRect.height)
+                    || (touchLeft && full.box.x < cropRect.x)
+                    || (touchRight && full.box.x + full.box.width > cropRect.x + cropRect.width);
+                if (beyond) {
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if (!replaced) kept.push_back(far);
+    }
+    return kept;
+}
+
 } // namespace
 
-YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend)
-    : backend_(std::move(backend)), farBackend_(std::move(farBackend)), nmsThreshold_(nmsThreshold) {}
+YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend,
+                           bool cropEdgeRule)
+    : backend_(std::move(backend)), farBackend_(std::move(farBackend)), nmsThreshold_(nmsThreshold), cropEdgeRule_(cropEdgeRule) {}
 
 std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTiming* timing) {
     // 기본 YOLO 검출
@@ -131,10 +187,15 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
     // 전체 프레임에서는 너무 작아진 원거리 차량을
     // 중앙 도로 crop 영역에서 한 번 더 확대 추론
     const auto farYoloStart = std::chrono::steady_clock::now();
-    const std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr);
+    cv::Rect farCropRect;
+    std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr, &farCropRect);
     const auto farYoloEnd = std::chrono::steady_clock::now();
 
     const auto postprocessStart = std::chrono::steady_clock::now();
+    // cropedge: 합치기 전에 crop 창 경계에 잘린 crop 박스를 같은 차의 전체 프레임 박스로 대신함
+    if (cropEdgeRule_ && farCropRect.area() > 0) {
+        farDetections = dropCropEdgeDuplicates(farDetections, detections, farCropRect, frame.size());
+    }
     // 전체 프레임 검출 + 원거리 crop 검출을 합침
     detections.insert(detections.end(), farDetections.begin(), farDetections.end());
     // 두 추론에서 같은 차량이 각각 검출될 수 있으므로
@@ -171,7 +232,7 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
  *
  * crop에서 나온 좌표는 다시 원본 프레임 좌표로 복원
  */
-std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing) {
+std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut) {
     const int cropX = static_cast<int>(std::round(frame.cols * 0.25F));
     const int cropY = static_cast<int>(std::round(frame.rows * 0.38F));
     const int cropWidth = static_cast<int>(std::round(frame.cols * 0.50F));
@@ -185,6 +246,7 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, 
     if (safeWidth <= 1 || safeHeight <= 1) return {};
 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
+    if (cropRectOut != nullptr) *cropRectOut = cropRect;
     const cv::Mat crop = frame(cropRect).clone();
 
     // crop 전용 백엔드가 있으면 그걸 씀. 없으면 전체 프레임 백엔드를 그대로 씀

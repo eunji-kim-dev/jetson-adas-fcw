@@ -37,15 +37,19 @@ class YoloDetector {
 public:
     // farBackend 를 주면 원거리 crop 추론에 그 백엔드를 씀 (예: 288x640 모델)
     // 안 주면(nullptr) 전체 프레임과 같은 백엔드로 crop 도 추론함 (기존 동작, golden 보존)
-    YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend = nullptr);
+    // cropEdgeRule 을 켜면 crop 창 경계에 잘린 crop 박스를 같은 차의 전체 프레임 박스로 대신함 (--lead-rule cropedge, 기본 꺼짐)
+    YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend = nullptr,
+                 bool cropEdgeRule = false);
 
     std::vector<Detection> detect(const cv::Mat& frame, DetectionTiming* timing = nullptr);
 
 private:
     // 화면 중앙 원거리 도로 영역 crop 보조 추론
-    std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing);
+    // cropRectOut 을 주면 이번 프레임에 쓴 crop 영역을 돌려줌 (crop 을 건너뛰면 빈 사각형 그대로)
+    std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut = nullptr);
 
     std::unique_ptr<InferenceBackend> backend_;
     std::unique_ptr<InferenceBackend> farBackend_;   // 비어 있으면 backend_ 를 같이 씀
     float nmsThreshold_;
+    bool cropEdgeRule_;   // cropedge
 };

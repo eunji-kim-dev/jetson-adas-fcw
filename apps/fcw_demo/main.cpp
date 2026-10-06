@@ -321,6 +321,8 @@ int main(int argc, char* argv[]) {
         std::cout << "[INFO] int8 실험: variant=" << options.int8Variant << " calibrator=" << options.int8Calibrator
                   << " shuffle_seed=" << options.int8ShuffleSeed << " fp32_head=" << (options.int8Fp32Head ? 1 : 0) << '\n';
     }
+    // --lead-rule cropedge: 검출기 단계 규칙이라 YoloDetector 를 만들 때 넘김 (LeadRuleFlags 에는 안 넣음)
+    const bool cropEdgeRule = std::find(options.leadRules.begin(), options.leadRules.end(), "cropedge") != options.leadRules.end();
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
@@ -330,7 +332,7 @@ int main(int argc, char* argv[]) {
             const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
             cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning);
         }
-        detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend));
+        detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend), cropEdgeRule);
     } catch (const std::exception& error) {
         std::cerr << "[ERROR] 추론 backend 생성 실패 (backend=" << backendName << ")\n" << error.what() << '\n';
         return 1;
