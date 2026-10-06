@@ -53,6 +53,11 @@ struct ObjectGeometry {
  *             기존 LEAD 는 유지하되 새 후보로는 안 냄. 배너 카운터도 동결 (WarningPolicy). history 없이는 아무것도 안 함
  *   rank    : 경쟁 후보 사이의 우선순위. 접지점이 lane 밖이고 겹침으로만 들어온 후보는 점수에서 (1 − 겹침비율) × 70 을 뺌
  *             후보 진입은 그대로라 그 후보가 유일하면 여전히 LEAD 가 됨 (07 옆 밴·13 옆 버스가 접지점 y 만으로 lane 안 앞차를 이겼음)
+ *   edge    : 박스가 화면 좌우 끝(2px 안)에 닿았고 접지점이 lane 밖이면, 겹침만으로 "새로" 후보가 되지 못함
+ *             화면 끝에 닿음 = 차 일부가 화면 밖 = 옆에 나란히 있는 차임. 박스 아래 변(가까운 옆구리)과 안쪽 변(먼 뒤 모서리)이
+ *             서로 다른 깊이에서 나와 겹침이 실제보다 크게 잡힘 (1_009 옆 SUV·6_014·06 옆 차가 lane 안 앞차를 이겼음)
+ *             이미 후보인 트랙(체류 > 0)은 막지 않음. 화면 안에서 들어온 컷인 차가 충돌 직전 화면 끝에 닿아도 유지됨 (11: 72)
+ *             접지점이 lane 안인 차는 해당 없음. 검은 테두리가 있는 영상은 테두리가 화면 끝이 아니라서 안 걸림
  *   bottom  : 박스가 화면 안에서 아래 변만 놓친 프레임(높이가 직전 정상 프레임보다 줄고 폭÷높이는 15% 넘게 커짐)을 화면 아래 절단과 같이
  *             폭 ÷ 종횡비로 높이를 보정해 TTC-P 이력을 이음. 5프레임 넘게 이어지면 새 모양으로 받아들임 (RiskAnalyzer 에서 씀)
  *             (07 86~89 에서 트럭 아래 변이 올라가 이력이 오염되고, 돌아온 90 이 급변으로 잡혀 93 에 리셋 → 충돌 102 까지 배너 못 띄움)
@@ -67,6 +72,7 @@ struct LeadRuleFlags {
     bool bonnet = false;
     bool hold = false;
     bool rank = false;
+    bool edge = false;
     bool bottom = false;
 };
 
@@ -83,8 +89,9 @@ struct LeadRuleFlags {
 class LeadSelector {
 public:
     // rules 를 생략하면 전부 꺼진 기존 규칙임
+    // frameWidth: edge 규칙이 박스가 화면 좌우 끝에 닿았는지 볼 때 씀. 0 이면 edge 를 켜도 아무것도 안 함
     LeadSelector(const std::vector<cv::Point>& roadRoi, const std::vector<cv::Point>& egoLaneRoi, double sourceFps,
-                 const LeadRuleFlags& rules = LeadRuleFlags());
+                 const LeadRuleFlags& rules = LeadRuleFlags(), int frameWidth = 0);
 
     // 한 프레임의 추적 결과로 기하 정보와 LEAD 선택을 갱신
     // analysisEnabled=false(장면 전환 워밍업)면 LEAD를 선택하지 않음
@@ -106,6 +113,7 @@ private:
     const int leadEligibilityFrames_;
     const int cutInEligibilityFrames_;
     const LeadRuleFlags rules_;
+    const int frameWidth_;   // edge: 화면 폭. 0 이면 edge 를 안 씀
 
     int activeLeadId_ = -1;
     std::unordered_map<int, int> egoLaneStreakById_;

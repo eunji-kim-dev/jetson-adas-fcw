@@ -500,6 +500,7 @@ int main(int argc, char* argv[]) {
         else if (rule == "bonnet") leadRules.bonnet = true;
         else if (rule == "hold") leadRules.hold = true;
         else if (rule == "rank") leadRules.rank = true;
+        else if (rule == "edge") leadRules.edge = true;
         else if (rule == "bottom") leadRules.bottom = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
@@ -534,7 +535,7 @@ int main(int argc, char* argv[]) {
     }
 
     MultiObjectTracker tracker(0.25F, 0.10F, 3, 20);
-    LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps, leadRules);
+    LeadSelector leadSelector(roadRoi, egoLaneRoi, sourceFps, leadRules, width);
     WarningPolicy warningPolicy(sourceFps, height, leadRules);
     // history 규칙이면 연속 프레임 높이 40% 붕괴 시 이력 초기화를 켬. bonnet·hold 는 관측 분류(classifyObservations)를 켬
     // bottom 은 화면 안 아래 변 누락 프레임의 높이 보정을 켬

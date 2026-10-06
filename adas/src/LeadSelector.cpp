@@ -26,6 +26,8 @@ constexpr std::size_t overlapHistorySize = 8;    // passby: 겹침 추세를 보
 constexpr float passByOverlapDrop = 0.10F;       // passby: 창 안에서 겹침이 이만큼 줄어야 passing-by
 constexpr float rankOverlapPenalty = 70.0F;      // rank: 겹침만으로 들어온 후보 감점 = (1 − 겹침) × 이 값 (px). 10/4 Jetson 21개 로그 재현으로 잡음 (16~115 에서 03 손해 없음·06 대상 경고. 400 은 03 이 5프레임 늦음)
 
+constexpr int edgeTouchPixels = 2;              // edge: 박스 왼쪽 x 가 이 값 이하이거나 오른쪽 끝이 (화면 폭 - 이 값) 이상이면 화면 끝에 닿은 것으로 봄
+
 struct LaneOverlap {
     bool valid = false;         // 박스 아래 변이 lane 사다리꼴 세로 범위 안에 있음
     float ratio = 0.0F;         // 박스 가로 폭 중 lane 안에 든 비율 (0~1)
@@ -83,13 +85,14 @@ LanePosition calculateLanePosition(const std::vector<cv::Point>& trapezoid, cons
 // ego lane 경계를 한두 프레임 벗어나도 기존 분석 이력을 바로 지우지 않기 위한 유예(grace)
 // 컷인 차량은 정의상 ego lane에 방금 들어온 차량이므로 일반 LEAD의 0.5초 체류 조건보다 짧은 조건을 사용
 LeadSelector::LeadSelector(const std::vector<cv::Point>& roadRoi, const std::vector<cv::Point>& egoLaneRoi, double sourceFps,
-                           const LeadRuleFlags& rules)
+                           const LeadRuleFlags& rules, int frameWidth)
     : roadRoi_(roadRoi),
       egoLaneRoi_(egoLaneRoi),
       egoLaneGraceFrames_(std::max(3, static_cast<int>(std::round(sourceFps * 0.15)))),
       leadEligibilityFrames_(std::max(1, static_cast<int>(std::round(sourceFps * 0.5)))),
       cutInEligibilityFrames_(std::max(4, static_cast<int>(std::round(sourceFps * 0.15)))),
-      rules_(rules) {}
+      rules_(rules),
+      frameWidth_(frameWidth) {}
 
 void LeadSelector::reset() {
     activeLeadId_ = -1;
@@ -181,6 +184,12 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
         bool laneCandidate = lanePosition.inside;
         if (rules_.overlap && !laneCandidate && laneOverlap.valid) {
             laneCandidate = laneOverlap.ratio >= (laneStreak > 0 ? overlapKeepRatio : overlapEntryRatio);
+        }
+        // edge: 화면 좌우 끝에 닿은 박스는 겹침만으로 "새로" 후보가 되지 못함 (뜻은 LeadSelector.hpp 의 LeadRuleFlags 참고)
+        // laneStreak 는 이번 프레임을 더하기 전 값임. 0 보다 크면 이미 후보였던 트랙이라 그대로 둠
+        if (rules_.edge && laneCandidate && !lanePosition.inside && laneStreak == 0 && frameWidth_ > 0) {
+            const bool touchesSide = box.x <= edgeTouchPixels || box.x + box.width >= frameWidth_ - edgeTouchPixels;
+            if (touchesSide) laneCandidate = false;
         }
 
         // 유예 판정에 쓸 "이번 프레임에 들어올 때의" 유예 잔량. 아래에서 줄이기 전 값임
