@@ -1043,6 +1043,16 @@ int main(int argc, char* argv[]) {
         record.preprocessCropMs = detectionTiming.farInference.preprocessMilliseconds;
         record.inferenceCropMs = detectionTiming.farInference.inferenceMilliseconds;
         record.postprocessCropMs = detectionTiming.farInference.postprocessMilliseconds;
+        // 전처리 세부 타이머 (그 경로에 없는 단계는 빈 칸)
+        record.resizeFullMs = detectionTiming.fullInference.resizeMilliseconds;
+        record.padFullMs = detectionTiming.fullInference.padMilliseconds;
+        record.blobFullMs = detectionTiming.fullInference.blobMilliseconds;
+        record.pinnedCopyFullMs = detectionTiming.fullInference.pinnedCopyMilliseconds;
+        record.resizeCropMs = detectionTiming.farInference.resizeMilliseconds;
+        record.padCropMs = detectionTiming.farInference.padMilliseconds;
+        record.blobCropMs = detectionTiming.farInference.blobMilliseconds;
+        record.pinnedCopyCropMs = detectionTiming.farInference.pinnedCopyMilliseconds;
+        record.cropCloneMs = detectionTiming.cropCloneMilliseconds;
         record.mergeMs = postprocessMilliseconds;
         record.detectMs = inferenceMilliseconds;
         record.trackingMs = std::chrono::duration<double, std::milli>(trackingEnd - trackingStart).count();

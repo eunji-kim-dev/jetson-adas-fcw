@@ -512,8 +512,11 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
 
     // 전처리
     const auto preprocessStart = std::chrono::steady_clock::now();
-    const LetterboxResult prepared = letterbox(image, t.inputSize);
+    LetterboxTiming letterboxTiming;
+    const LetterboxResult prepared = letterbox(image, t.inputSize, &letterboxTiming);
+    const auto blobStart = std::chrono::steady_clock::now();
     cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, t.inputSize, cv::Scalar(), true, false);
+    const auto blobEnd = std::chrono::steady_clock::now();
     
     if (!blob.isContinuous() || blob.total() * sizeof(float) != t.inputBytes) {
         throw std::runtime_error("blob 크기가 엔진 입력과 다름");
@@ -544,6 +547,11 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
         timing->preprocessMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
         timing->inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - preprocessEnd).count();
         timing->postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - inferenceEnd).count();
+        // 세부 타이머 (전처리 안의 몫)
+        timing->resizeMilliseconds = letterboxTiming.resizeMilliseconds;
+        timing->padMilliseconds = letterboxTiming.padMilliseconds;
+        timing->blobMilliseconds = std::chrono::duration<double, std::milli>(blobEnd - blobStart).count();
+        timing->pinnedCopyMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - blobEnd).count();
     }
 
     return detections;

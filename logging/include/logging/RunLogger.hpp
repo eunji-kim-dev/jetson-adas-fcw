@@ -109,6 +109,18 @@ struct FrameRecord {
     std::optional<bool> hValid;            // TTR-H 계산 여부
     std::optional<std::string> hLevel;     // H 단계 (게이트 뒤)
     std::optional<std::string> pLevel;     // P 단계 (게이트 뒤, risk_state 와 같은 값). LEAD 없으면 빈 칸
+
+    // 전처리 세부 타이머 (ms, preprocess_full/crop_ms 안의 몫). 그 경로에 없는 단계는 빈 칸
+    //   CPU 경로: resize·pad·blob·pinned_copy (pinned_copy 는 TensorRT 만), crop_clone (Crop 영역 clone, farYolo 안의 몫)
+    std::optional<double> resizeFullMs;
+    std::optional<double> padFullMs;
+    std::optional<double> blobFullMs;
+    std::optional<double> pinnedCopyFullMs;
+    std::optional<double> resizeCropMs;
+    std::optional<double> padCropMs;
+    std::optional<double> blobCropMs;
+    std::optional<double> pinnedCopyCropMs;
+    std::optional<double> cropCloneMs;
 };
 
 /*
@@ -121,7 +133,8 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    static constexpr int kSchemaVersion = 7;   // v7: ttc_mode·노면 4점 값·z_c_m 추가, raw_frame_log 에 distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
+    // v8: raw_frame_log 에 전처리 세부 타이머(resize·pad·blob·pinned_copy × Full·Crop, crop_clone) 열 추가. v7: ttc_mode·노면 4점 값·z_c_m 추가, raw_frame_log 에 distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
+    static constexpr int kSchemaVersion = 8;
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

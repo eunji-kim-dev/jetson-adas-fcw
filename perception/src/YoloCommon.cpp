@@ -5,16 +5,14 @@
 
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
-LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize) {
+LetterboxGeometry computeLetterboxGeometry(const cv::Size& frameSize, const cv::Size& inputSize) {
     // 가로·세로 축소 비율 중 작은 쪽을 씀. 입력이 정사각형이면 예전 계산과 같음
-    const float scale = std::min(static_cast<float>(inputSize.width) / static_cast<float>(frame.cols), static_cast<float>(inputSize.height) / static_cast<float>(frame.rows));
-    const int resizedWidth = static_cast<int>(std::round(static_cast<float>(frame.cols) * scale));
-    const int resizedHeight = static_cast<int>(std::round(static_cast<float>(frame.rows) * scale));
-
-    cv::Mat resized;
-    cv::resize(frame, resized, cv::Size(resizedWidth, resizedHeight));
+    const float scale = std::min(static_cast<float>(inputSize.width) / static_cast<float>(frameSize.width), static_cast<float>(inputSize.height) / static_cast<float>(frameSize.height));
+    const int resizedWidth = static_cast<int>(std::round(static_cast<float>(frameSize.width) * scale));
+    const int resizedHeight = static_cast<int>(std::round(static_cast<float>(frameSize.height) * scale));
 
     // 여백은 가로·세로 따로 계산함 (직사각형 입력 대응)
     const int totalPadX = inputSize.width - resizedWidth;
@@ -24,10 +22,27 @@ LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize) {
     const int padTop = totalPadY / 2;
     const int padBottom = totalPadY - padTop;
 
-    cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, padTop, padBottom, padLeft, padRight, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+    return {scale, cv::Size(resizedWidth, resizedHeight), padLeft, padTop, padRight, padBottom};
+}
 
-    return {padded, scale, padLeft, padTop};
+LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize, LetterboxTiming* timing) {
+    const LetterboxGeometry geometry = computeLetterboxGeometry(frame.size(), inputSize);
+
+    const auto resizeStart = std::chrono::steady_clock::now();
+    cv::Mat resized;
+    cv::resize(frame, resized, geometry.resized);
+    const auto resizeEnd = std::chrono::steady_clock::now();
+
+    cv::Mat padded;
+    cv::copyMakeBorder(resized, padded, geometry.padTop, geometry.padBottom, geometry.padLeft, geometry.padRight, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+    const auto padEnd = std::chrono::steady_clock::now();
+
+    if (timing != nullptr) {
+        timing->resizeMilliseconds = std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
+        timing->padMilliseconds = std::chrono::duration<double, std::milli>(padEnd - resizeEnd).count();
+    }
+
+    return {padded, geometry.scale, geometry.padLeft, geometry.padTop};
 }
 
 std::vector<Detection> decodeYoloOutput(

@@ -20,9 +20,27 @@ struct LetterboxResult {
     int padY;
 };
 
+// letterbox 크기 계산 (축소 비율·resize 크기·여백). CPU letterbox 와 GPU 전처리가 같은 값을 쓰게 한 곳에 둠
+struct LetterboxGeometry {
+    float scale;
+    cv::Size resized;
+    int padLeft;
+    int padTop;
+    int padRight;
+    int padBottom;
+};
+LetterboxGeometry computeLetterboxGeometry(const cv::Size& frameSize, const cv::Size& inputSize);
+
+// CPU 세부 타이머: letterbox 안의 resize·pad 시간 (ms)
+struct LetterboxTiming {
+    double resizeMilliseconds = 0.0;
+    double padMilliseconds = 0.0;
+};
+
 // 모델 입력 크기(가로 x 세로)에 맞춰 비율을 유지한 채 축소하고 회색(114)으로 패딩함
 // 정사각형(640x640)이면 예전과 계산이 완전히 같음. 288x640 처럼 직사각형도 받음
-LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize);
+// timing 이 nullptr 가 아니면 resize·pad 시간을 채움
+LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize, LetterboxTiming* timing = nullptr);
 
 /*
  * YOLOv8 출력 텐서를 Detection 목록으로 바꿈

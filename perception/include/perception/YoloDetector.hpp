@@ -5,6 +5,7 @@
 
 #include <opencv2/core.hpp>
 #include <memory>
+#include <optional>
 #include <vector>
 
 // detect() 내부 단계별 소요 시간 (ms)
@@ -15,12 +16,14 @@
 // - postprocessMilliseconds : 두 결과 병합 NMS + 포함형 중복 제거 + 극소 박스 필터
 // - fullInference / farInference : 각 backend 호출 내부의 단계별 시간
 //   (crop 영역이 유효하지 않아 추론을 건너뛰면 farInference는 0으로 남음)
+// - cropCloneMilliseconds : Crop 영역 clone() 시간 (farYolo 안의 몫)
 struct DetectionTiming {
     double fullYoloMilliseconds = 0.0;
     double farYoloMilliseconds = 0.0;
     double postprocessMilliseconds = 0.0;
     InferenceTiming fullInference;
     InferenceTiming farInference;
+    std::optional<double> cropCloneMilliseconds;
 };
 
 /*
@@ -46,7 +49,9 @@ public:
 private:
     // 화면 중앙 원거리 도로 영역 crop 보조 추론
     // cropRectOut 을 주면 이번 프레임에 쓴 crop 영역을 돌려줌 (crop 을 건너뛰면 빈 사각형 그대로)
-    std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut = nullptr);
+    // cloneMilliseconds 에 Crop clone 시간을 씀 (clone 안 하면 그대로 둠)
+    std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut = nullptr,
+                                                std::optional<double>* cloneMilliseconds = nullptr);
 
     std::unique_ptr<InferenceBackend> backend_;
     std::unique_ptr<InferenceBackend> farBackend_;   // 비어 있으면 backend_ 를 같이 씀

@@ -26,7 +26,10 @@ const char* const kCsvHeader =
     "merge_ms,detect_ms,tracking_ms,decision_ms,total_processing_ms,output_ms,deadline_miss,"
     "detections,tracks,lead_id,lead_found,ttc_p,risk_state,warning_state,scene_changed,"
     "source_drops,app_drops,"
-    "distance_m,ttr_h,h_valid,h_level,p_level";
+    "distance_m,ttr_h,h_valid,h_level,p_level,"
+    "resize_full_ms,pad_full_ms,blob_full_ms,pinned_copy_full_ms,"
+    "resize_crop_ms,pad_crop_ms,blob_crop_ms,pinned_copy_crop_ms,"
+    "crop_clone_ms";
 
 std::string jsonEscape(const std::string& text) {
     std::string out;
@@ -142,7 +145,10 @@ void RunLogger::writeFrame(const FrameRecord& r) {
               << cell(r.riskState) << ',' << cell(r.warningState) << ',' << cell(r.sceneChanged) << ','
               << r.sourceDrops << ',' << r.appDrops << ','
               << cell(r.distanceM) << ',' << cell(r.ttrH) << ',' << cell(r.hValid) << ','
-              << cell(r.hLevel) << ',' << cell(r.pLevel)
+              << cell(r.hLevel) << ',' << cell(r.pLevel) << ','
+              << cell(r.resizeFullMs) << ',' << cell(r.padFullMs) << ',' << cell(r.blobFullMs) << ',' << cell(r.pinnedCopyFullMs) << ','
+              << cell(r.resizeCropMs) << ',' << cell(r.padCropMs) << ',' << cell(r.blobCropMs) << ',' << cell(r.pinnedCopyCropMs) << ','
+              << cell(r.cropCloneMs)
               << '\n';
     ++framesProcessed_;
 }

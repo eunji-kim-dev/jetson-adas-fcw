@@ -24,7 +24,8 @@ import os
 import statistics
 import sys
 
-SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5, 6, 7}   # v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음). v6: lead_rule 추가. v7: ttc_mode·노면 값, distance_m·ttr_h·h_valid·h_level·p_level 열 추가
+# v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음). v6: lead_rule 추가. v7: ttc_mode·노면 값, distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v8: 전처리 세부 타이머 열 추가
+SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5, 6, 7, 8} 
 
 # ---------- 유틸 ----------
 
@@ -151,6 +152,21 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
     result["preprocess_ms_p50"] = percentile(pre, 50)
     result["postprocess_ms_p50"] = percentile(post, 50)
 
+    # v8: 전처리 세부 타이머 — 프레임마다 Full + Crop 을 더한 값의 p50. 그 경로에 없는 칸은 비어 있어 n/a
+    def pair_sum_p50(full_name, crop_name):
+        values = []
+        for r in measured:
+            a, b = to_float(r.get(full_name)), to_float(r.get(crop_name))
+            if a is not None and b is not None:
+                values.append(a + b)
+        return percentile(values, 50)
+
+    result["pre_resize_ms_p50"] = pair_sum_p50("resize_full_ms", "resize_crop_ms")
+    result["pre_pad_ms_p50"] = pair_sum_p50("pad_full_ms", "pad_crop_ms")
+    result["pre_blob_ms_p50"] = pair_sum_p50("blob_full_ms", "blob_crop_ms")
+    result["pre_copy_ms_p50"] = pair_sum_p50("pinned_copy_full_ms", "pinned_copy_crop_ms")
+    result["crop_clone_ms_p50"] = percentile(column("crop_clone_ms"), 50)
+
     # FPS: 측정 프레임의 dequeue 간격 기준 (처리량)
     dequeue = [to_int(r["dequeue_ts_ns"]) for r in measured]
     span_s = (dequeue[-1] - dequeue[0]) / 1e9 if len(dequeue) > 1 else 0.0
@@ -207,6 +223,11 @@ PER_RUN_COLUMNS = [
     ("inference_full_ms_p50", "inf_full p50", 1),
     ("inference_crop_ms_p50", "inf_crop p50", 1),
     ("preprocess_ms_p50", "pre p50", 2),
+    ("pre_resize_ms_p50", "resize p50", 2),
+    ("pre_pad_ms_p50", "pad p50", 2),
+    ("pre_blob_ms_p50", "blob p50", 2),
+    ("pre_copy_ms_p50", "copy p50", 2),
+    ("crop_clone_ms_p50", "clone p50", 3),
     ("postprocess_ms_p50", "post p50", 2),
     ("deadline_miss_rate", "miss rate", 3),
     ("frame_age_ms_p50", "age p50", 1),
@@ -284,6 +305,7 @@ def main():
     print("hardware: " + "; ".join(sorted({r["hardware"] or "unknown" for r in results})))
     print("frame age: capture_ts_clock == monotonic 인 run 에서만 계산 (영상 파일은 n/a)")
     print("drops: frame_seq 건너뜀 합. drop src = 카메라 쪽 누락, drop app = 프로그램 쪽 버림 (threaded). v5 미만 로그는 n/a")
+    print("pre p50 = Full+Crop 전처리 합. resize·pad·blob·copy 는 그 안의 몫 (CPU 경로), clone = Crop clone (farYolo 안). v8 미만 로그는 n/a")
     
     if len(results) > 1:
         print("\n== run 간 변동 (min / max / (max-min)/median) ==")

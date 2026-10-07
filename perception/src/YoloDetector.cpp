@@ -188,7 +188,8 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
     // 중앙 도로 crop 영역에서 한 번 더 확대 추론
     const auto farYoloStart = std::chrono::steady_clock::now();
     cv::Rect farCropRect;
-    std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr, &farCropRect);
+    std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr, &farCropRect,
+                                                                timing != nullptr ? &timing->cropCloneMilliseconds : nullptr);
     const auto farYoloEnd = std::chrono::steady_clock::now();
 
     const auto postprocessStart = std::chrono::steady_clock::now();
@@ -232,7 +233,8 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
  *
  * crop에서 나온 좌표는 다시 원본 프레임 좌표로 복원
  */
-std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut) {
+std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut,
+                                                          std::optional<double>* cloneMilliseconds) {
     const int cropX = static_cast<int>(std::round(frame.cols * 0.25F));
     const int cropY = static_cast<int>(std::round(frame.rows * 0.38F));
     const int cropWidth = static_cast<int>(std::round(frame.cols * 0.50F));
@@ -247,7 +249,12 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, 
 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
     if (cropRectOut != nullptr) *cropRectOut = cropRect;
+    const auto cloneStart = std::chrono::steady_clock::now();
     const cv::Mat crop = frame(cropRect).clone();
+    // 세부 타이머: Crop clone 시간 (farYolo 안의 몫)
+    if (cloneMilliseconds != nullptr) {
+        *cloneMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cloneStart).count();
+    }
 
     // crop 전용 백엔드가 있으면 그걸 씀. 없으면 전체 프레임 백엔드를 그대로 씀
     InferenceBackend& cropBackend = farBackend_ != nullptr ? *farBackend_ : *backend_;

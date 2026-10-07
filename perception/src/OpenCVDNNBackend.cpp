@@ -16,7 +16,9 @@ OpenCVDNNBackend::OpenCVDNNBackend(const std::string& modelPath, float confidenc
 std::vector<Detection> OpenCVDNNBackend::infer(const cv::Mat& image, InferenceTiming* timing) {
     // 전처리: letterbox + NCHW blob. 입력 크기는 생성자에서 받은 값(기본 640x640)
     const auto preprocessStart = std::chrono::steady_clock::now();
-    const LetterboxResult prepared = letterbox(image, inputSize_);
+    LetterboxTiming letterboxTiming;
+    const LetterboxResult prepared = letterbox(image, inputSize_, &letterboxTiming);
+    const auto blobStart = std::chrono::steady_clock::now();
     cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, inputSize_, cv::Scalar(), true, false);
     const auto preprocessEnd = std::chrono::steady_clock::now();
 
@@ -38,6 +40,10 @@ std::vector<Detection> OpenCVDNNBackend::infer(const cv::Mat& image, InferenceTi
         timing->preprocessMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
         timing->inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - preprocessEnd).count();
         timing->postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - inferenceEnd).count();
+        // 세부 타이머 (전처리 안의 몫)
+        timing->resizeMilliseconds = letterboxTiming.resizeMilliseconds;
+        timing->padMilliseconds = letterboxTiming.padMilliseconds;
+        timing->blobMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - blobStart).count();
     }
 
     return detections;

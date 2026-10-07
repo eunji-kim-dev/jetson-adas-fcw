@@ -4,6 +4,7 @@
 
 #include <opencv2/core.hpp>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,10 +12,18 @@
 // - preprocess : 입력 이미지를 모델 입력 형태로 변환 (letterbox, blob 생성 등)
 // - inference  : 추론 엔진 실행 (입력 바인딩 + forward)
 // - postprocess: 출력 텐서 디코드, 좌표 복원, 클래스 필터, 단일 이미지 NMS
+//
+// 세부 타이머 (preprocess 안의 몫). 그 경로에 없는 단계는 비어 있음 → raw_frame_log 빈 칸
+// - resize / pad / blob : CPU letterbox 의 cv::resize, copyMakeBorder, blobFromImage
+// - pinnedCopy          : blob → pinned 버퍼 memcpy (TensorRT CPU 경로만)
 struct InferenceTiming {
     double preprocessMilliseconds = 0.0;
     double inferenceMilliseconds = 0.0;
     double postprocessMilliseconds = 0.0;
+    std::optional<double> resizeMilliseconds;
+    std::optional<double> padMilliseconds;
+    std::optional<double> blobMilliseconds;
+    std::optional<double> pinnedCopyMilliseconds;
 };
 
 /*
