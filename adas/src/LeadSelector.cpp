@@ -27,6 +27,8 @@ constexpr float passByOverlapDrop = 0.10F;       // passby: 창 안에서 겹침
 constexpr float rankOverlapPenalty = 70.0F;      // rank: 겹침만으로 들어온 후보 감점 = (1 − 겹침) × 이 값 (px). 10/4 Jetson 21개 로그 재현으로 잡음 (16~115 에서 03 손해 없음·06 대상 경고. 400 은 03 이 5프레임 늦음)
 
 constexpr int edgeTouchPixels = 2;              // edge: 박스 왼쪽 x 가 이 값 이하이거나 오른쪽 끝이 (화면 폭 - 이 값) 이상이면 화면 끝에 닿은 것으로 봄
+constexpr int edgeReleasePixels = 20;           // edge: 옆 차로 기억한 트랙은 박스가 화면 좌우 끝에서 이 값보다 멀어져야 풀림 (17_072 버스 박스 끝은 1917~1919 로 흔들렸음. 실험값)
+constexpr int edgeReleaseFrames = 3;            // edge: 위 조건이 이 영상 프레임 수만큼 연속이어야 풀림 (lane 유예 3프레임과 같은 크기. 실험값)
 
 struct LaneOverlap {
     bool valid = false;         // 박스 아래 변이 lane 사다리꼴 세로 범위 안에 있음
@@ -103,6 +105,7 @@ void LeadSelector::reset() {
     unseenFramesById_.clear();
     geometryById_.clear();
     lastGeometryById_.clear();
+    edgeSideClearFramesById_.clear();
 }
 
 void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled,
@@ -141,6 +144,7 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             overlapHistoryById_.erase(trackedObject.trackId);
             unseenFramesById_.erase(trackedObject.trackId);
             lastGeometryById_.erase(trackedObject.trackId);
+            edgeSideClearFramesById_.erase(trackedObject.trackId);
             ObjectGeometry geometry;
             geometry.groundPoint = groundPoint;
             geometry.insideRoad = insideRoad;
@@ -149,6 +153,11 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             continue;
         }
         if (observation != nullptr && observation->held) {
+            // edge: held 프레임은 박스를 못 믿으니 옆 차 기억의 "끝에서 떨어진 연속 프레임" 수를 0 으로 되돌림 (기억은 유지)
+            if (rules_.edge) {
+                const auto side = edgeSideClearFramesById_.find(trackedObject.trackId);
+                if (side != edgeSideClearFramesById_.end()) side->second = 0;
+            }
             // 보존: 체류·유예·횡이동·겹침·미관측 이력을 전부 건드리지 않고 마지막 정상 프레임의 기하를 재사용함
             // 기존 LEAD 는 점수를 그대로 등록해 유지하고, 새 LEAD 후보로는 내지 않음 (proposedLead 갱신 없음)
             const auto previousGeometry = lastGeometryById_.find(trackedObject.trackId);
@@ -186,10 +195,29 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             laneCandidate = laneOverlap.ratio >= (laneStreak > 0 ? overlapKeepRatio : overlapEntryRatio);
         }
         // edge: 화면 좌우 끝에 닿은 박스는 겹침만으로 "새로" 후보가 되지 못함 (뜻은 LeadSelector.hpp 의 LeadRuleFlags 참고)
-        // laneStreak 는 이번 프레임을 더하기 전 값임. 0 보다 크면 이미 후보였던 트랙이라 그대로 둠
-        if (rules_.edge && laneCandidate && !lanePosition.inside && laneStreak == 0 && frameWidth_ > 0) {
+        // 한 번 닿은 트랙은 옆 차로 기억해서, 끝에서 1~2px 떨어진 프레임이나 이미 후보가 된 뒤에도 겹침만으로는 후보가 못 되게 함
+        if (rules_.edge && frameWidth_ > 0) {
+            const int trackId = trackedObject.trackId;
             const bool touchesSide = box.x <= edgeTouchPixels || box.x + box.width >= frameWidth_ - edgeTouchPixels;
-            if (touchesSide) laneCandidate = false;
+            const bool clearOfSide = box.x > edgeReleasePixels && box.x + box.width < frameWidth_ - edgeReleasePixels;
+            auto side = edgeSideClearFramesById_.find(trackId);
+            // 기억 풀기: 끝에서 확실히 떨어진 영상 프레임이 연속으로 쌓여야 풀림. 닿거나 가까워지면 0 부터 다시 셈
+            if (side != edgeSideClearFramesById_.end()) {
+                side->second = clearOfSide ? side->second + 1 : 0;
+                if (side->second >= edgeReleaseFrames) {
+                    edgeSideClearFramesById_.erase(side);
+                    side = edgeSideClearFramesById_.end();
+                }
+            }
+            // 기억 걸기: 아직 후보가 아니고(체류 0) 접지점이 lane 밖인데 화면 끝에 닿음. 겹침이 진입 기준 미만이어도 기억함
+            // laneStreak 는 이번 프레임을 더하기 전 값임. 이미 후보인 트랙(화면 안에서 들어와 끝에 닿은 컷인, 11: 72)은 기억하지 않음
+            if (touchesSide && !lanePosition.inside && laneStreak == 0) {
+                if (side == edgeSideClearFramesById_.end()) side = edgeSideClearFramesById_.emplace(trackId, 0).first;
+                side->second = 0;
+            }
+            // 기억 중: 접지점이 lane 밖이면 체류와 상관없이 후보가 못 됨. 접지점이 lane 안인 프레임은 후보가 되지만 기억은 안 지움
+            // (후보가 되면 기억을 지우면 17_072 198 처럼 접지점이 한 프레임만 lane 안에 찍혀도 그 뒤가 "이미 후보" 예외로 이어짐)
+            if (side != edgeSideClearFramesById_.end() && laneCandidate && !lanePosition.inside) laneCandidate = false;
         }
 
         // 유예 판정에 쓸 "이번 프레임에 들어올 때의" 유예 잔량. 아래에서 줄이기 전 값임
@@ -331,6 +359,16 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
     for (auto iterator = lastGeometryById_.begin(); iterator != lastGeometryById_.end();) {
         if (shouldDropHistory(iterator->first)) iterator = lastGeometryById_.erase(iterator);
         else ++iterator;
+    }
+    // edge: 옆 차 기억도 다른 이력과 같은 시점에 지움 (gap 이면 3프레임 미관측까지 보존)
+    // 보존 중인 미관측 프레임은 "끝에서 떨어진 연속 프레임" 수를 0 으로 되돌림 (관측 횟수가 아니라 연속 영상 프레임으로 셈)
+    for (auto iterator = edgeSideClearFramesById_.begin(); iterator != edgeSideClearFramesById_.end();) {
+        if (shouldDropHistory(iterator->first)) {
+            iterator = edgeSideClearFramesById_.erase(iterator);
+            continue;
+        }
+        if (geometryById_.find(iterator->first) == geometryById_.end()) iterator->second = 0;
+        ++iterator;
     }
 
     const auto activeLeadIterator = leadScoreById.find(activeLeadId_);
