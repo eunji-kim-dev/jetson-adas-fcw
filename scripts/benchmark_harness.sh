@@ -10,6 +10,8 @@
 # 옵션
 #   --clocks on|off|asis   jetson_clocks 를 켜고/되돌리고/건드리지 않고 측정할지 (기본 asis)
 #   --video  on|off|asis   결과 영상을 쓸지 (기본 asis — 바이너리 기본 동작 그대로)
+#   --gpu-preprocess       전처리를 GPU 커널로 함 (adas --gpu-preprocess, tensorrt_* 전용)
+#                          GPU 입력 텐서가 CPU 경로와 비트 단위로 같아서(10/7 Jetson 확인) golden 은 CPU 경로와 같은 값을 씀
 #
 # 사람이 입력하는 것은 실험 이름과 위 두 옵션뿐이고,
 # 나머지 측정 조건은 아래 상수로 고정함
@@ -94,6 +96,7 @@ usage() {
     echo "  예:   bash scripts/benchmark_harness.sh baseline_jetson_cpu --clocks on --video off" >&2
     echo "  예:   bash scripts/benchmark_harness.sh trt_fp16_jetson --backend tensorrt_fp16 --clocks on --video off" >&2
     echo "  crop 전용 모델: --crop-model models/yolov8n_288x640.onnx --crop-input 288x640 (둘 다 있어야 함, golden 은 crop 구조별로 따로 둠)" >&2
+    echo "  GPU 전처리: --gpu-preprocess (tensorrt_* 전용, golden 은 CPU 경로와 같음)" >&2
     exit 2
 }
 
@@ -103,6 +106,7 @@ CLOCKS_MODE="asis"
 VIDEO_MODE="asis"
 CROP_MODEL=""
 CROP_INPUT=""
+GPU_PREPROCESS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -130,6 +134,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "[ERROR] --crop-input 에 값이 없음" >&2; usage; }
             CROP_INPUT="$2"
             shift 2
+            ;;
+        --gpu-preprocess)
+            GPU_PREPROCESS=1
+            shift
             ;;
         -h|--help)
             usage
@@ -187,7 +195,17 @@ if [[ -n "${CROP_MODEL}" || -n "${CROP_INPUT}" ]]; then
     fi
 fi
 
-readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT
+# GPU 전처리는 TensorRT 백엔드에만 있음 (adas 도 막지만 5회 대기에 들어가기 전에 여기서 먼저 막음)
+if [[ "${GPU_PREPROCESS}" -eq 1 && "${BACKEND}" != tensorrt_* ]]; then
+    echo "[ERROR] --gpu-preprocess 는 tensorrt_* 백엔드에서만 씀: ${BACKEND}" >&2
+    usage
+fi
+PREPROCESS_PATH="cpu"
+if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
+    PREPROCESS_PATH="gpu"
+fi
+
+readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT GPU_PREPROCESS PREPROCESS_PATH
 
 
 # ------------------------------------------------------------
@@ -247,6 +265,7 @@ case "${GOLDEN_KEY}" in
         ;;
 esac
 # 위 표에 없는 조합은 예전처럼 비교를 건너뛰고 회차별 MD5 만 찍음
+# --gpu-preprocess 도 같은 키를 씀 (GPU 입력 텐서가 CPU 경로와 비트 단위로 같음, 10/7 Jetson 확인)
 readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
@@ -729,6 +748,14 @@ case "${VIDEO_MODE}" in
         warn "결과 영상 여부를 지정하지 않음 (바이너리 기본 동작)"
         ;;
 esac
+# --gpu-preprocess 를 주려면 바이너리가 그 플래그를 받아야 함 (없으면 5회가 전부 시작하자마자 실패함)
+if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
+    if grep -q -- '--gpu-preprocess' <<< "${help_text:-}"; then
+        ok "전처리를 GPU 경로로 측정함 (--gpu-preprocess)"
+    else
+        fail "바이너리에 --gpu-preprocess 플래그가 없음 — ④ GPU 전처리가 들어간 빌드인지 확인할 것"
+    fi
+fi
 echo
 
 echo "Golden 기준 (${GOLDEN_KEY})"
@@ -882,6 +909,7 @@ printf '  build type      : %s\n' "${BUILD_TYPE}"
 printf '  power mode      : %s (%s)\n' "${POWER_MODE}" "${POWER_MODE_SOURCE}"
 printf '  clocks mode     : %s\n' "${CLOCKS_MODE}"
 printf '  video mode      : %s\n' "${VIDEO_MODE}"
+printf '  preprocess      : %s\n' "${PREPROCESS_PATH}"
 printf '  result disk     : %s (%s)\n' "${RESULT_DISK:-unknown}" "${RESULT_DISK_KIND}"
 printf '  warmup frames   : %s\n' "${WARMUP_FRAMES}"
 printf '  measured frames : %s\n' "${MEASURED_FRAMES}"
@@ -993,6 +1021,9 @@ run_one() {
     fi
     if [[ -n "${CROP_MODEL}" ]]; then
         bin_args+=(--crop-model "${CROP_MODEL}" --crop-input "${CROP_INPUT}")
+    fi
+    if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
+        bin_args+=(--gpu-preprocess)
     fi
 
     # set -e 가 켜져 있어도 || 왼쪽의 실패는 중단 사유가 아님
@@ -1137,6 +1168,7 @@ run_one() {
   "build_type": "${BUILD_TYPE}",
   "cxx_flags_release": "${CXX_FLAGS_RELEASE}",
   "backend": "${BACKEND}",
+  "preprocess": "${PREPROCESS_PATH}",
   "power_mode": "${POWER_MODE}",
   "power_mode_source": "${POWER_MODE_SOURCE}",
   "clocks_mode": "${CLOCKS_MODE}",
@@ -1256,6 +1288,7 @@ input_md5="$(md5sum "${INPUT_REL}" | awk '{print $1}')"
     printf 'input             : %s\n' "${INPUT_REL}"
     printf 'model             : %s\n' "${MODEL_REL}"
     printf 'backend           : %s\n' "${BACKEND}"
+    printf 'preprocess        : %s\n' "${PREPROCESS_PATH}"
     printf 'power_mode        : %s\n' "${POWER_MODE}"
     printf 'power_mode_source : %s\n' "${POWER_MODE_SOURCE}"
     printf 'warmup_frames     : %s\n' "${WARMUP_FRAMES}"
