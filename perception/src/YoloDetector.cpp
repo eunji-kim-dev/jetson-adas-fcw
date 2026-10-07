@@ -249,15 +249,22 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, 
 
     const cv::Rect cropRect(safeX, safeY, safeWidth, safeHeight);
     if (cropRectOut != nullptr) *cropRectOut = cropRect;
-    const auto cloneStart = std::chrono::steady_clock::now();
-    const cv::Mat crop = frame(cropRect).clone();
-    // 세부 타이머: Crop clone 시간 (farYolo 안의 몫)
-    if (cloneMilliseconds != nullptr) {
-        *cloneMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cloneStart).count();
-    }
 
     // crop 전용 백엔드가 있으면 그걸 씀. 없으면 전체 프레임 백엔드를 그대로 씀
     InferenceBackend& cropBackend = farBackend_ != nullptr ? *farBackend_ : *backend_;
+
+    // GPU 전처리 백엔드는 업로드가 행 간격을 받으므로 ROI 뷰를 그대로 넘김 (복사 1번 줄임)
+    // CPU 경로는 지금처럼 clone 함 (golden·측정 기준 유지). clone 시간은 세부 타이머로 남김
+    cv::Mat crop;
+    if (cropBackend.usesGpuPreprocess()) {
+        crop = frame(cropRect);
+    } else {
+        const auto cloneStart = std::chrono::steady_clock::now();
+        crop = frame(cropRect).clone();
+        if (cloneMilliseconds != nullptr) {
+            *cloneMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cloneStart).count();
+        }
+    }
     std::vector<Detection> cropDetections = cropBackend.infer(crop, timing);
     std::vector<Detection> result;
 

@@ -35,6 +35,11 @@
 int main(int argc, char* argv[]) {
     RunOptions options;
     if (!parseRunOptions(argc, argv, "perception_demo", options)) return 1;
+    // GPU 전처리 옵션은 adas 전용임. 여기서 조용히 CPU 경로로 돌면 --gpu-preprocess-check 가 비교를 안 한 채 끝남
+    if (options.gpuPreprocess) {
+        std::cerr << "[ERROR] --gpu-preprocess / --gpu-preprocess-check 는 adas 전용임 (perception_demo 는 CPU 전처리만)\n";
+        return 1;
+    }
     const std::string& inputPath = options.inputPath;
     const std::string& backendName = options.backendName;
 

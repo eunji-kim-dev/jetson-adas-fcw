@@ -45,6 +45,19 @@ find_package(Threads REQUIRED)
 if(ENABLE_TENSORRT)
     find_package(CUDAToolkit REQUIRED)
 
+    # GPU 전처리 커널(perception/src/GpuPreprocess.cu)을 nvcc 로 빌드함
+    # nvcc 가 PATH 에 없어도(Jetson 기본 /usr/local/cuda/bin) CUDAToolkit 이 찾은 nvcc 를 씀
+    if(NOT CMAKE_CUDA_COMPILER AND CUDAToolkit_NVCC_EXECUTABLE)
+        set(CMAKE_CUDA_COMPILER ${CUDAToolkit_NVCC_EXECUTABLE})
+    endif()
+    # Orin = compute 8.7. 다른 GPU 면 -DCMAKE_CUDA_ARCHITECTURES=<값> 으로 줌
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 87)
+    endif()
+    # TensorRT·TensorRTBackend.cpp 가 쓰는 공유 cudart 와 같은 런타임을 쓰게 함 (기본은 정적 cudart)
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+    enable_language(CUDA)
+
     # TensorRT 는 공식 CMake 설정 파일이 없어서 직접 찾음
     # JetPack: /usr/include/aarch64-linux-gnu, /usr/lib/aarch64-linux-gnu
     # x86 tar 설치: -DTENSORRT_ROOT=/opt/TensorRT-10.x 로 알려줌

@@ -37,6 +37,7 @@ struct RunMetadata {
     std::string fullCropStrategy;  // "full+crop_every_frame"
     std::string cropModel;         // crop 추론 모델 경로. 전체 프레임과 같은 모델이면 "same_as_model"
     std::string cropInput;         // crop 추론 입력 크기 "HxW". 기본 "640x640"
+    std::string preprocess;        // "cpu" / "gpu" / "gpu_check" (adas --gpu-preprocess). perception_demo 는 비움
     std::string laneRoi;           // "default" 또는 "x1,y1,...,x4,y4" (--lane-roi 픽셀 좌표)
     std::string leadRule;          // "none" 또는 "overlap,gap" 처럼 --lead-rule 목록 (adas). perception_demo 는 비움
     // TTR-H 실험 (adas --ttc-mode). perception_demo 는 비움. proxy 면 노면 값은 빈 칸·null
@@ -121,6 +122,9 @@ struct FrameRecord {
     std::optional<double> blobCropMs;
     std::optional<double> pinnedCopyCropMs;
     std::optional<double> cropCloneMs;
+    //   GPU 경로 (--gpu-preprocess): gpu_pre = 업로드 + 커널 + sync. 이때 위 CPU 칸은 빈 칸
+    std::optional<double> gpuPreprocessFullMs;
+    std::optional<double> gpuPreprocessCropMs;
 };
 
 /*
@@ -133,8 +137,7 @@ struct FrameRecord {
  */
 class RunLogger {
 public:
-    // v8: raw_frame_log 에 전처리 세부 타이머(resize·pad·blob·pinned_copy × Full·Crop, crop_clone) 열 추가. v7: ttc_mode·노면 4점 값·z_c_m 추가, raw_frame_log 에 distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
-    static constexpr int kSchemaVersion = 8;
+    static constexpr int kSchemaVersion = 9;   // v9: preprocess 추가, raw_frame_log 에 gpu_pre_full_ms·gpu_pre_crop_ms 열 추가. v8: raw_frame_log 에 전처리 세부 타이머(resize·pad·blob·pinned_copy × Full·Crop, crop_clone) 열 추가. v7: ttc_mode·노면 4점 값·z_c_m 추가, raw_frame_log 에 distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v6: lead_rule 추가. v5: capture_mode 추가, raw_frame_log 에 source_drops·app_drops 열 추가
 
     RunLogger(const std::string& runsRoot, RunMetadata metadata);
     ~RunLogger();

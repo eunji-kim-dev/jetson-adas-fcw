@@ -16,6 +16,7 @@
 //   tensorrt_fp32   TensorRT, GPU, 32비트  (ENABLE_TENSORRT=ON 빌드에서만)
 //   tensorrt_fp16   TensorRT, GPU, 16비트  (ENABLE_TENSORRT=ON 빌드에서만)
 //   tensorrt_int8   TensorRT, GPU, 8비트 정수 (calibration 필요, ENABLE_TENSORRT=ON 빌드에서만)
+// GPU 전처리(preprocess.gpu)는 tensorrt_* 만 받음
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
     const std::string& modelPath,
@@ -23,9 +24,11 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     float nmsThreshold,
     const cv::Size& inputSize,
     const std::string& calibrationList,
-    const Int8Tuning& int8Tuning
+    const Int8Tuning& int8Tuning,
+    const PreprocessOptions& preprocess
 ) {
     if (backendName == "opencv_dnn") {
+        if (preprocess.gpu) throw std::invalid_argument("GPU 전처리(--gpu-preprocess)는 tensorrt_* 백엔드만 지원함: " + backendName);
         return std::make_unique<OpenCVDNNBackend>(modelPath, confidenceThreshold, nmsThreshold, inputSize);
     }
 
@@ -34,7 +37,7 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     if (backendName.rfind(prefix, 0) == 0) {
         const std::string precision = backendName.substr(prefix.size());
 #ifdef PERCEPTION_HAS_TENSORRT
-        return std::make_unique<TensorRTBackend>(modelPath, precision, confidenceThreshold, nmsThreshold, inputSize, calibrationList, int8Tuning);
+        return std::make_unique<TensorRTBackend>(modelPath, precision, confidenceThreshold, nmsThreshold, inputSize, calibrationList, int8Tuning, preprocess);
 #else
         throw std::invalid_argument("이 빌드에는 TensorRT 가 없음 (-DENABLE_TENSORRT=ON 으로 다시 빌드): " + backendName);
 #endif

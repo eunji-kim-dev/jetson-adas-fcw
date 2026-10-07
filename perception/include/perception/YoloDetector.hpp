@@ -16,7 +16,7 @@
 // - postprocessMilliseconds : 두 결과 병합 NMS + 포함형 중복 제거 + 극소 박스 필터
 // - fullInference / farInference : 각 backend 호출 내부의 단계별 시간
 //   (crop 영역이 유효하지 않아 추론을 건너뛰면 farInference는 0으로 남음)
-// - cropCloneMilliseconds : Crop 영역 clone() 시간 (farYolo 안의 몫)
+// - cropCloneMilliseconds : Crop 영역 clone() 시간 (farYolo 안의 몫). GPU 전처리 경로는 ROI 뷰를 넘겨서 비어 있음
 struct DetectionTiming {
     double fullYoloMilliseconds = 0.0;
     double farYoloMilliseconds = 0.0;

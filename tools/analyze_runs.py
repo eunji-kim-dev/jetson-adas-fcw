@@ -24,8 +24,7 @@ import os
 import statistics
 import sys
 
-# v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음). v6: lead_rule 추가. v7: ttc_mode·노면 값, distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v8: 전처리 세부 타이머 열 추가
-SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5, 6, 7, 8} 
+SUPPORTED_SCHEMAS = {1, 2, 3, 4, 5, 6, 7, 8, 9}   # v4: crop_model, crop_input 추가. v5: capture_mode, source_drops·app_drops 열 추가 (없으면 빈 값으로 읽음). v6: lead_rule 추가. v7: ttc_mode·노면 값, distance_m·ttr_h·h_valid·h_level·p_level 열 추가. v8: 전처리 세부 타이머 열 추가. v9: preprocess, gpu_pre 열 추가
 
 # ---------- 유틸 ----------
 
@@ -130,6 +129,7 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
         "hardware": summary.get("hardware"),
         "lead_rule": summary.get("lead_rule") or "none",   # v6 미만 로그는 none
         "ttc_mode": summary.get("ttc_mode") or "proxy",    # v7 미만 로그는 proxy
+        "preprocess": summary.get("preprocess") or "cpu",  # v9 미만 로그는 cpu
         "frames": len(measured),
         "warmup": warmup,
         "deadline_ms": deadline_ms,
@@ -166,6 +166,8 @@ def summarize_run(summary, rows, warmup, deadline_ms, short_segment_s):
     result["pre_blob_ms_p50"] = pair_sum_p50("blob_full_ms", "blob_crop_ms")
     result["pre_copy_ms_p50"] = pair_sum_p50("pinned_copy_full_ms", "pinned_copy_crop_ms")
     result["crop_clone_ms_p50"] = percentile(column("crop_clone_ms"), 50)
+    # v9: GPU 전처리 (업로드 + 커널 + sync). CPU 경로면 비어 있어 n/a
+    result["gpu_pre_ms_p50"] = pair_sum_p50("gpu_pre_full_ms", "gpu_pre_crop_ms")
 
     # FPS: 측정 프레임의 dequeue 간격 기준 (처리량)
     dequeue = [to_int(r["dequeue_ts_ns"]) for r in measured]
@@ -214,6 +216,7 @@ PER_RUN_COLUMNS = [
     ("git", "git", 0),
     ("lead_rule", "lead rule", 0),
     ("ttc_mode", "ttc mode", 0),
+    ("preprocess", "pre path", 0),
     ("frames", "frames", 0),
     ("fps", "FPS", 2),
     ("total_processing_ms_p50", "proc p50", 1),
@@ -228,6 +231,7 @@ PER_RUN_COLUMNS = [
     ("pre_blob_ms_p50", "blob p50", 2),
     ("pre_copy_ms_p50", "copy p50", 2),
     ("crop_clone_ms_p50", "clone p50", 3),
+    ("gpu_pre_ms_p50", "gpu pre p50", 2),
     ("postprocess_ms_p50", "post p50", 2),
     ("deadline_miss_rate", "miss rate", 3),
     ("frame_age_ms_p50", "age p50", 1),
@@ -306,6 +310,7 @@ def main():
     print("frame age: capture_ts_clock == monotonic 인 run 에서만 계산 (영상 파일은 n/a)")
     print("drops: frame_seq 건너뜀 합. drop src = 카메라 쪽 누락, drop app = 프로그램 쪽 버림 (threaded). v5 미만 로그는 n/a")
     print("pre p50 = Full+Crop 전처리 합. resize·pad·blob·copy 는 그 안의 몫 (CPU 경로), clone = Crop clone (farYolo 안). v8 미만 로그는 n/a")
+    print("gpu pre = 업로드+커널+sync (--gpu-preprocess 경로, v9). CPU 경로는 n/a")
     
     if len(results) > 1:
         print("\n== run 간 변동 (min / max / (max-min)/median) ==")

@@ -1,5 +1,8 @@
 #include "TensorRTBackend.hpp"
 
+#include "GpuPreprocess.hpp"
+#include "LetterboxTables.hpp"
+
 #include "YoloCommon.hpp"
 
 #include <NvInfer.h>
@@ -9,7 +12,9 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -370,24 +375,171 @@ struct TensorRTBackend::Impl {
     void* deviceInput = nullptr;
     void* deviceOutput = nullptr;
 
+    // GPU 전처리 (--gpu-preprocess). 프레임 버퍼·계수표는 크기가 바뀔 때만 다시 잡음
+    bool gpuPreprocess = false;
+    bool gpuPreprocessCheck = false;
+    unsigned char* deviceFrame = nullptr;   // 업로드한 BGR 프레임 (cudaMallocPitch)
+    std::size_t deviceFramePitch = 0;
+    cv::Size deviceFrameSize;
+    ResizeTables tables;                    // 지금 장치에 올린 계수표 (원본·resize 크기가 같으면 재사용)
+    int* deviceColumns = nullptr;
+    int* deviceRows = nullptr;
+    std::size_t deviceColumnCapacity = 0;   // 잡아 둔 int 칸 수
+    std::size_t deviceRowCapacity = 0;
+
+    // --gpu-preprocess-check: 비교 한 종류의 집계 (다른 값이 있던 프레임 수, 다른 값 수, 최대 차 × 255)
+    struct CheckStats {
+        long long frames = 0;
+        long long values = 0;
+        double maxDifference = 0.0;
+    };
+    long long checkedFrames = 0;
+    CheckStats gpuVsCpu;          // GPU 입력 텐서 vs CPU 경로 (letterbox + blobFromImage)
+    CheckStats gpuVsReference;    // GPU vs CPU 기준 함수 (같은 식을 CPU 로) → 다르면 커널 문제
+    CheckStats referenceVsCpu;    // 기준 함수 vs CPU 경로 → 다르면 이 장비 OpenCV 가 일반 식과 다름 (HAL 등)
+    std::vector<float> checkGpu;
+    std::vector<float> checkReference;
+
+    // 프레임을 장치로 올리고 커널로 deviceInput 을 채움. stream 에 넣기만 함 (호출자가 sync)
+    void runGpuLetterbox(const cv::Mat& image, const LetterboxGeometry& geometry);
+    // GPU 입력 텐서를 CPU 경로·기준 함수와 비교함 (sync 뒤에 부름)
+    void compareWithCpu(const cv::Mat& image);
+
     ~Impl() {
         // 실행 중인 작업이 있으면 끝난 뒤에 지움
         if (stream) cudaStreamSynchronize(stream);
+        if (checkedFrames > 0) printCheckSummary();
         if (deviceInput) cudaFree(deviceInput);
         if (deviceOutput) cudaFree(deviceOutput);
         if (hostInput) cudaFreeHost(hostInput);
         if (hostOutput) cudaFreeHost(hostOutput);
+        if (deviceFrame) cudaFree(deviceFrame);
+        if (deviceColumns) cudaFree(deviceColumns);
+        if (deviceRows) cudaFree(deviceRows);
         if (stream) cudaStreamDestroy(stream);
         // context / engine / runtime 는 unique_ptr 가 선언 역순으로 지움
     }
+
+private:
+    void printCheckSummary() const;
 };
+
+// GPU 전처리: 업로드 1번 + 커널 1번. ROI 뷰(Crop)도 행 간격(image.step)을 그대로 받음
+void TensorRTBackend::Impl::runGpuLetterbox(const cv::Mat& image, const LetterboxGeometry& geometry) {
+    if (image.type() != CV_8UC3) throw std::runtime_error("GPU 전처리는 8비트 BGR 3채널만 받음");
+
+    // 1) 프레임 버퍼: 크기가 바뀔 때만 다시 잡음
+    if (image.size() != deviceFrameSize) {
+        if (deviceFrame) cudaFree(deviceFrame);
+        deviceFrame = nullptr;
+        checkCuda(cudaMallocPitch(reinterpret_cast<void**>(&deviceFrame), &deviceFramePitch,
+                                  static_cast<std::size_t>(image.cols) * 3, static_cast<std::size_t>(image.rows)),
+                  "cudaMallocPitch(frame)");
+        deviceFrameSize = image.size();
+    }
+
+    // 2) 계수표: 원본·resize 크기가 바뀔 때만 다시 만들어 올림 (선형 방식만 표가 있음)
+    if (tables.source != image.size() || tables.resized != geometry.resized) {
+        tables = buildResizeTables(image.size(), geometry.resized);
+        if (tables.columns.size() > deviceColumnCapacity) {
+            if (deviceColumns) cudaFree(deviceColumns);
+            deviceColumns = nullptr;
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&deviceColumns), tables.columns.size() * sizeof(int)), "cudaMalloc(columns)");
+            deviceColumnCapacity = tables.columns.size();
+        }
+        if (tables.rows.size() > deviceRowCapacity) {
+            if (deviceRows) cudaFree(deviceRows);
+            deviceRows = nullptr;
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&deviceRows), tables.rows.size() * sizeof(int)), "cudaMalloc(rows)");
+            deviceRowCapacity = tables.rows.size();
+        }
+        // 크기가 바뀔 때만이라 동기 복사로 둠
+        if (!tables.columns.empty()) {
+            checkCuda(cudaMemcpy(deviceColumns, tables.columns.data(), tables.columns.size() * sizeof(int), cudaMemcpyHostToDevice), "columns 업로드");
+        }
+        if (!tables.rows.empty()) {
+            checkCuda(cudaMemcpy(deviceRows, tables.rows.data(), tables.rows.size() * sizeof(int), cudaMemcpyHostToDevice), "rows 업로드");
+        }
+    }
+
+    // 3) 프레임 업로드. pageable 메모리라 함수가 돌아올 때 원본은 다 읽힌 상태 → 그 뒤 결과 영상 그리기와 안 겹침
+    checkCuda(cudaMemcpy2DAsync(deviceFrame, deviceFramePitch, image.data, image.step,
+                                static_cast<std::size_t>(image.cols) * 3, static_cast<std::size_t>(image.rows),
+                                cudaMemcpyHostToDevice, stream),
+              "프레임 업로드");
+
+    // 4) 커널: letterbox·RGB·/255 → TensorRT 입력 버퍼
+    const LetterboxKernelArgs args = makeLetterboxArgs(tables, geometry, inputSize, deviceFrame, deviceFramePitch, deviceColumns, deviceRows);
+    checkCuda(launchLetterboxKernel(args, static_cast<float*>(deviceInput), stream), "letterbox 커널");
+}
+
+// GPU 입력 텐서 vs CPU 경로 vs CPU 기준 함수. float 를 비트 단위로 비교함
+void TensorRTBackend::Impl::compareWithCpu(const cv::Mat& image) {
+    const std::size_t count = inputBytes / sizeof(float);
+    checkGpu.resize(count);
+    checkReference.resize(count);
+    checkCuda(cudaMemcpy(checkGpu.data(), deviceInput, inputBytes, cudaMemcpyDeviceToHost), "확인용 D2H");
+
+    // CPU 경로 = 지금 golden 경로와 같은 계산
+    const LetterboxResult prepared = letterbox(image, inputSize);
+    const cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, inputSize, cv::Scalar(), true, false);
+    if (!blob.isContinuous() || blob.total() != count) throw std::runtime_error("확인용 blob 크기가 입력과 다름");
+    const float* cpu = blob.ptr<float>();
+
+    letterboxBlobReference(image, inputSize, checkReference.data());
+
+    auto compare = [count](const float* a, const float* b, CheckStats& stats) {
+        long long different = 0;
+        double maxDifference = 0.0;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (std::memcmp(&a[i], &b[i], sizeof(float)) != 0) {
+                ++different;
+                maxDifference = std::max(maxDifference, std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i])) * 255.0);
+            }
+        }
+        if (different > 0) ++stats.frames;
+        stats.values += different;
+        stats.maxDifference = std::max(stats.maxDifference, maxDifference);
+        return different;
+    };
+    const long long gpuCpu = compare(checkGpu.data(), cpu, gpuVsCpu);
+    const long long gpuReference = compare(checkGpu.data(), checkReference.data(), gpuVsReference);
+    const long long referenceCpu = compare(checkReference.data(), cpu, referenceVsCpu);
+    ++checkedFrames;
+
+    // 다른 프레임은 앞쪽 몇 개만 바로 찍음
+    if ((gpuCpu > 0 || gpuReference > 0 || referenceCpu > 0) && gpuVsCpu.frames + gpuVsReference.frames + referenceVsCpu.frames <= 5) {
+        std::cerr << "[GPU 전처리 확인] 입력 " << inputSize.width << "x" << inputSize.height << " 호출 " << checkedFrames
+                  << " (원본 " << image.cols << "x" << image.rows << "): GPU≠CPU " << gpuCpu << "개, GPU≠기준 " << gpuReference
+                  << "개, 기준≠CPU " << referenceCpu << "개\n";
+    }
+}
+
+void TensorRTBackend::Impl::printCheckSummary() const {
+    auto line = [this](const char* name, const CheckStats& stats) {
+        std::cerr << "  " << name << ": 같음 " << (checkedFrames - stats.frames) << " / 다름 " << stats.frames
+                  << " (다른 값 " << stats.values << "개, 최대 차 " << stats.maxDifference << "/255)\n";
+    };
+    std::cerr << "[GPU 전처리 확인] 입력 " << inputSize.width << "x" << inputSize.height << ", 비교한 호출 " << checkedFrames << "\n";
+    line("GPU = CPU 경로      ", gpuVsCpu);
+    line("GPU = 기준 함수     ", gpuVsReference);
+    line("기준 함수 = CPU 경로", referenceVsCpu);
+    if (referenceVsCpu.values > 0) {
+        std::cerr << "  → 이 장비 OpenCV 의 resize 가 일반 식과 다름 (HAL 등). 비트 일치 전제가 깨짐 → 21절 비교 기준(픽셀 차·박스)으로 봄\n";
+    } else if (gpuVsReference.values > 0) {
+        std::cerr << "  → 기준 함수와 GPU 가 다름 = 커널·업로드 문제\n";
+    } else if (gpuVsCpu.values == 0) {
+        std::cerr << "  → 입력 텐서가 CPU 경로와 비트 단위로 같음\n";
+    }
+}
 
 // ------------------------------------------------------------
 // 생성자: 엔진 준비 → I/O 텐서 조사 → 버퍼 할당 → 주소 바인딩
 // ------------------------------------------------------------
 
 TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
-                                 const cv::Size& expectedInputSize, const std::string& calibrationList, const Int8Tuning& int8Tuning)
+                                 const cv::Size& expectedInputSize, const std::string& calibrationList, const Int8Tuning& int8Tuning,
+                                 const PreprocessOptions& preprocess)
     : impl_(std::make_unique<Impl>()), confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
     using namespace nvinfer1;
 
@@ -492,10 +644,21 @@ TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string
         throw std::runtime_error("출력 텐서 주소 바인딩 실패: " + impl_->outputName);
     }
 
+    // 5) GPU 전처리: /255 값표를 상수 메모리에 올림. 프레임 버퍼·계수표는 첫 프레임 크기를 보고 잡음
+    if (preprocess.gpu) {
+        const std::array<float, 256> lut = buildBlobLut();
+        checkCuda(uploadBlobLut(lut.data()), "blob 값표 업로드");
+        impl_->gpuPreprocess = true;
+        impl_->gpuPreprocessCheck = preprocess.check;
+    }
+
     std::cerr << "[TensorRT] 준비 완료 " << precision
               << " 입력 " << impl_->inputName << dimsToString(impl_->inputDims)
-              << " 출력 " << impl_->outputName << dimsToString(impl_->outputDims) << '\n';
+              << " 출력 " << impl_->outputName << dimsToString(impl_->outputDims)
+              << " 전처리 " << (preprocess.gpu ? (preprocess.check ? "GPU (CPU 경로와 비교)" : "GPU") : "CPU") << '\n';
 }
+
+bool TensorRTBackend::usesGpuPreprocess() const { return impl_->gpuPreprocess; }
 
 TensorRTBackend::~TensorRTBackend() = default;
 
@@ -503,31 +666,55 @@ TensorRTBackend::~TensorRTBackend() = default;
 // 추론
 // ------------------------------------------------------------
 // 단계 구분은 OpenCVDNNBackend 와 맞춤
-//   preprocess  : letterbox + blob (CPU)
-//   inference   : H2D 복사 + enqueue + D2H 복사 + 동기화
+//   preprocess  : letterbox + blob (CPU). GPU 전처리면 업로드 + 커널 + sync
+//   inference   : H2D 복사 + enqueue + D2H 복사 + 동기화. GPU 전처리면 H2D 없음
 //   postprocess : 디코드 + NMS (CPU)
+// 두 경로는 "추론" 칸에 든 것이 달라서(H2D) 칸끼리 바로 비교하지 않음. Full + Crop YOLO 합·프레임 p50 으로 비교함
 
 std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTiming* timing) {
     Impl& t = *impl_;
 
     // 전처리
     const auto preprocessStart = std::chrono::steady_clock::now();
+    LetterboxResult prepared{};
     LetterboxTiming letterboxTiming;
-    const LetterboxResult prepared = letterbox(image, t.inputSize, &letterboxTiming);
-    const auto blobStart = std::chrono::steady_clock::now();
-    cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, t.inputSize, cv::Scalar(), true, false);
-    const auto blobEnd = std::chrono::steady_clock::now();
-    
-    if (!blob.isContinuous() || blob.total() * sizeof(float) != t.inputBytes) {
-        throw std::runtime_error("blob 크기가 엔진 입력과 다름");
+    std::chrono::steady_clock::time_point blobStart;
+    std::chrono::steady_clock::time_point blobEnd;
+    if (t.gpuPreprocess) {
+        // GPU 경로: decode 에 쓸 축소 비율·여백은 CPU letterbox 와 같은 함수로 계산함 (그림은 안 만듦)
+        const LetterboxGeometry geometry = computeLetterboxGeometry(image.size(), t.inputSize);
+        prepared.scale = geometry.scale;
+        prepared.padX = geometry.padLeft;
+        prepared.padY = geometry.padTop;
+        t.runGpuLetterbox(image, geometry);
+        // 전처리 시간을 따로 재려고 여기서 기다림 (sync 1번 추가)
+        checkCuda(cudaStreamSynchronize(t.stream), "GPU 전처리 sync");
+    } else {
+        prepared = letterbox(image, t.inputSize, &letterboxTiming);
+        blobStart = std::chrono::steady_clock::now();
+        cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, t.inputSize, cv::Scalar(), true, false);
+        blobEnd = std::chrono::steady_clock::now();
+
+        if (!blob.isContinuous() || blob.total() * sizeof(float) != t.inputBytes) {
+            throw std::runtime_error("blob 크기가 엔진 입력과 다름");
+        }
+        // 한 번 더 복사하는 이유: blob 은 일반 메모리라 pinned 버퍼로 옮겨야 비동기 H2D 가 됨
+        // (GPU 전처리 경로는 이 복사와 H2D 가 없음)
+        std::memcpy(t.hostInput, blob.ptr<float>(), t.inputBytes);
     }
-    // 한 번 더 복사하는 이유: blob 은 일반 메모리라 pinned 버퍼로 옮겨야 비동기 H2D 가 됨
-    // (Memory Path 단계에서 blob 을 pinned 에 직접 만들거나 GPU 전처리로 바꿀 자리)
-    std::memcpy(t.hostInput, blob.ptr<float>(), t.inputBytes);
     const auto preprocessEnd = std::chrono::steady_clock::now();
 
+    // --gpu-preprocess-check: 입력 텐서를 CPU 경로와 비교함 (측정 구간 밖)
+    std::chrono::steady_clock::time_point inferenceStart = preprocessEnd;
+    if (t.gpuPreprocess && t.gpuPreprocessCheck) {
+        t.compareWithCpu(image);
+        inferenceStart = std::chrono::steady_clock::now();
+    }
+
     // 추론
-    checkCuda(cudaMemcpyAsync(t.deviceInput, t.hostInput, t.inputBytes, cudaMemcpyHostToDevice, t.stream), "H2D");
+    if (!t.gpuPreprocess) {
+        checkCuda(cudaMemcpyAsync(t.deviceInput, t.hostInput, t.inputBytes, cudaMemcpyHostToDevice, t.stream), "H2D");
+    }
     if (!t.context->enqueueV3(t.stream)) {
         throw std::runtime_error("TensorRT enqueueV3 실패");
     }
@@ -545,13 +732,17 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
 
     if (timing != nullptr) {
         timing->preprocessMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
-        timing->inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - preprocessEnd).count();
+        timing->inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - inferenceStart).count();
         timing->postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - inferenceEnd).count();
-        // 세부 타이머 (전처리 안의 몫)
-        timing->resizeMilliseconds = letterboxTiming.resizeMilliseconds;
-        timing->padMilliseconds = letterboxTiming.padMilliseconds;
-        timing->blobMilliseconds = std::chrono::duration<double, std::milli>(blobEnd - blobStart).count();
-        timing->pinnedCopyMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - blobEnd).count();
+        // 세부 타이머 (전처리 안의 몫). 경로에 없는 칸은 비워 둠
+        if (t.gpuPreprocess) {
+            timing->gpuPreprocessMilliseconds = timing->preprocessMilliseconds;
+        } else {
+            timing->resizeMilliseconds = letterboxTiming.resizeMilliseconds;
+            timing->padMilliseconds = letterboxTiming.padMilliseconds;
+            timing->blobMilliseconds = std::chrono::duration<double, std::milli>(blobEnd - blobStart).count();
+            timing->pinnedCopyMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - blobEnd).count();
+        }
     }
 
     return detections;

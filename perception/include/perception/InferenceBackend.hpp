@@ -16,6 +16,7 @@
 // 세부 타이머 (preprocess 안의 몫). 그 경로에 없는 단계는 비어 있음 → raw_frame_log 빈 칸
 // - resize / pad / blob : CPU letterbox 의 cv::resize, copyMakeBorder, blobFromImage
 // - pinnedCopy          : blob → pinned 버퍼 memcpy (TensorRT CPU 경로만)
+// - gpuPreprocess       : 프레임 업로드 + 커널 + sync 벽시계 (TensorRT --gpu-preprocess 경로만. 이때 preprocess 와 같은 값)
 struct InferenceTiming {
     double preprocessMilliseconds = 0.0;
     double inferenceMilliseconds = 0.0;
@@ -24,6 +25,19 @@ struct InferenceTiming {
     std::optional<double> padMilliseconds;
     std::optional<double> blobMilliseconds;
     std::optional<double> pinnedCopyMilliseconds;
+    std::optional<double> gpuPreprocessMilliseconds;
+};
+
+/*
+ * 전처리 경로 (--gpu-preprocess). 기본은 CPU 경로 (golden 보존)
+ *   gpu   : TensorRT 전용. GPU 커널 한 번으로 letterbox·RGB·/255 를 해서 TensorRT 입력 버퍼에 바로 씀
+ *           (CPU resize·pad·blob, pinned memcpy, blob H2D 가 빠지고 프레임 업로드가 들어감)
+ *   check : gpu 와 같이 씀. 프레임마다 GPU 입력 텐서를 CPU 경로(letterbox + blobFromImage)·CPU 기준 함수와 비트 단위로 비교해
+ *           다른 값 수를 셈. 끝날 때 요약을 표준 에러로 냄 (확인용이라 느림. 측정에는 안 씀)
+ */
+struct PreprocessOptions {
+    bool gpu = false;
+    bool check = false;
 };
 
 /*
@@ -42,6 +56,9 @@ public:
 
     // timing이 nullptr가 아니면 단계별 소요 시간을 채운다
     virtual std::vector<Detection> infer(const cv::Mat& image, InferenceTiming* timing = nullptr) = 0;
+
+    // GPU 전처리 경로면 true. 이때 YoloDetector 는 Crop 을 clone 하지 않고 ROI 뷰로 넘김 (업로드가 행 간격을 받음)
+    virtual bool usesGpuPreprocess() const { return false; }
 };
 
 /*
@@ -73,6 +90,7 @@ struct Int8Tuning {
  *   INT8 엔진을 처음 만들 때만 필요하고, 엔진이나 calibration 캐시가 이미 있으면 비워도 됨.
  *   다른 백엔드는 무시함.
  * int8Tuning 도 tensorrt_int8 전용 (위 Int8Tuning). 기본값이면 정식 엔진과 같음.
+ * preprocess 는 전처리 경로 (위 PreprocessOptions). gpu 는 tensorrt_* 만 받고, 다른 백엔드면 std::invalid_argument.
  */
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
@@ -81,5 +99,6 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     float nmsThreshold,
     const cv::Size& inputSize = cv::Size(640, 640),
     const std::string& calibrationList = "",
-    const Int8Tuning& int8Tuning = Int8Tuning()
+    const Int8Tuning& int8Tuning = Int8Tuning(),
+    const PreprocessOptions& preprocess = PreprocessOptions()
 );

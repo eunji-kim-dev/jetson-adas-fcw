@@ -51,6 +51,9 @@
  *   --road-status <글자>        assumed | verified (기록용)
  *   --d0-m <m>                 범퍼~가시 노면 끝 여유 (예약 값, 계산에 안 씀. 기록용)
  *                              --road-* · --bonnet-y · --d0-m 은 --ttc-mode homography|both 와 같이 줘야 함
+ *   --gpu-preprocess           tensorrt_* 전용. 전처리(letterbox·RGB·/255)를 GPU 커널 한 번으로 함 (기본 꺼짐 = CPU 경로, golden 보존)
+ *   --gpu-preprocess-check     --gpu-preprocess 와 같이 돌면서 프레임마다 GPU 입력 텐서를 CPU 경로와 비트 단위로 비교함
+ *                              끝날 때 표준 에러로 요약을 냄 (확인용이라 느림. 측정에는 안 씀)
  */
 
 struct RunOptions {
@@ -88,6 +91,8 @@ struct RunOptions {
     std::optional<int> roadFrame;        // --road-frame (기록용)
     std::string roadStatus;              // --road-status (기록용)
     std::optional<double> d0M;           // --d0-m (예약, 기록용)
+    bool gpuPreprocess = false;          // --gpu-preprocess: TensorRT 입력을 GPU 커널로 만듦
+    bool gpuPreprocessCheck = false;     // --gpu-preprocess-check: GPU 입력 텐서를 CPU 경로와 비교 (gpuPreprocess 도 켬)
 };
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
@@ -107,7 +112,8 @@ inline void printUsage(const std::string& programName) {
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
               << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge]"
               << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
-              << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]\n";
+              << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]"
+              << " [--gpu-preprocess | --gpu-preprocess-check]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -274,6 +280,11 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
                 if (comma == std::string::npos) break;
                 start = comma + 1;
             }
+        } else if (argument == "--gpu-preprocess") {
+            options.gpuPreprocess = true;
+        } else if (argument == "--gpu-preprocess-check") {
+            options.gpuPreprocess = true;
+            options.gpuPreprocessCheck = true;
         } else if (argument == "--ttc-mode") {
             if (!takeValue(i, argument, options.ttcMode)) return false;
             if (options.ttcMode != "proxy" && options.ttcMode != "homography" && options.ttcMode != "both") {
@@ -406,6 +417,11 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
             std::cerr << "[ERROR] --ttc-mode " << options.ttcMode << " 는 --threaded-capture 와 같이 못 씀 (건너뛴 프레임 때문에 거리 샘플 시간이 어긋남)\n";
             return false;
         }
+    }
+    // GPU 전처리는 TensorRT 백엔드에만 있음 (opencv_dnn 은 CPU 추론이라 입력을 GPU 로 만들 이유가 없음)
+    if (options.gpuPreprocess && options.backendName.rfind("tensorrt_", 0) != 0) {
+        std::cerr << "[ERROR] --gpu-preprocess 는 tensorrt_* 백엔드에서만 씀: " << options.backendName << '\n';
+        return false;
     }
     return true;
 }

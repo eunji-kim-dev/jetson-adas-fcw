@@ -323,14 +323,18 @@ int main(int argc, char* argv[]) {
     }
     // --lead-rule cropedge: 검출기 단계 규칙이라 YoloDetector 를 만들 때 넘김 (LeadRuleFlags 에는 안 넣음)
     const bool cropEdgeRule = std::find(options.leadRules.begin(), options.leadRules.end(), "cropedge") != options.leadRules.end();
+    // --gpu-preprocess: Full·Crop 두 엔진 모두 GPU 커널로 입력을 만듦 (기본 꺼짐 = CPU 경로)
+    PreprocessOptions preprocessOptions;
+    preprocessOptions.gpu = options.gpuPreprocess;
+    preprocessOptions.check = options.gpuPreprocessCheck;
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
-        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList, int8Tuning);
+        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList, int8Tuning, preprocessOptions);
         std::unique_ptr<InferenceBackend> cropBackend;
         if (!options.cropModelPath.empty()) {
             const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
-            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning);
+            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning, preprocessOptions);
         }
         detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend), cropEdgeRule);
     } catch (const std::exception& error) {
@@ -339,6 +343,8 @@ int main(int argc, char* argv[]) {
     }
     YoloDetector& detector = *detectorPtr;
     std::cout << "[INFO] 추론 backend: " << backendName << '\n';
+    std::cout << "[INFO] 전처리: " << (options.gpuPreprocessCheck ? "GPU 커널 + CPU 경로 비교 (--gpu-preprocess-check, 측정용 아님)"
+                                       : options.gpuPreprocess ? "GPU 커널 (--gpu-preprocess)" : "CPU (letterbox + blob)") << '\n';
     if (options.cropModelPath.empty()) {
         std::cout << "[INFO] crop 추론: 전체 프레임과 같은 모델 (640x640)\n";
     } else {
@@ -586,6 +592,8 @@ int main(int argc, char* argv[]) {
         runMetadata.cropModel = options.cropModelPath;
         runMetadata.cropInput = std::to_string(options.cropInputHeight) + "x" + std::to_string(options.cropInputWidth);
     }
+    // 어느 전처리 경로로 나온 결과인지 run_summary 에 남김 (GPU 경로 비교용)
+    runMetadata.preprocess = options.gpuPreprocessCheck ? "gpu_check" : options.gpuPreprocess ? "gpu" : "cpu";
     // 영상별 ROI 가 달라지므로 어느 ROI 로 나온 결과인지 run_summary 에 남김
     if (options.laneRoiPx.empty()) {
         runMetadata.laneRoi = "default";
@@ -1053,6 +1061,8 @@ int main(int argc, char* argv[]) {
         record.blobCropMs = detectionTiming.farInference.blobMilliseconds;
         record.pinnedCopyCropMs = detectionTiming.farInference.pinnedCopyMilliseconds;
         record.cropCloneMs = detectionTiming.cropCloneMilliseconds;
+        record.gpuPreprocessFullMs = detectionTiming.fullInference.gpuPreprocessMilliseconds;
+        record.gpuPreprocessCropMs = detectionTiming.farInference.gpuPreprocessMilliseconds;
         record.mergeMs = postprocessMilliseconds;
         record.detectMs = inferenceMilliseconds;
         record.trackingMs = std::chrono::duration<double, std::milli>(trackingEnd - trackingStart).count();
