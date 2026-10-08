@@ -21,9 +21,11 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -345,6 +347,56 @@ std::vector<char> buildEngine(const std::string& modelPath, const std::string& p
     return std::vector<char>(begin, begin + serialized->size());
 }
 
+// ------------------------------------------------------------
+// 카메라 MMAP 버퍼의 CUDA 등록 (GPU 전처리 v2, --camera-zero-copy)
+// ------------------------------------------------------------
+// Full·Crop 두 백엔드가 같은 카메라 버퍼를 읽음. 같은 메모리를 두 번 등록하면 CUDA 가 거부하므로
+// 프로세스에서 버퍼마다 한 번만 등록하고, 쓰는 백엔드 수를 세어 마지막 백엔드가 지워질 때 등록을 품
+// 등록은 카메라 버퍼 munmap 전에 풀려야 함 → main 에서 카메라 입력을 detector 보다 먼저 선언함 (detector 가 먼저 지워짐)
+struct CameraBufferRegistration {
+    const unsigned char* host = nullptr;
+    std::size_t bytes = 0;
+    unsigned char* device = nullptr;
+    int users = 0;
+};
+
+std::mutex cameraRegistryMutex;
+std::vector<CameraBufferRegistration> cameraRegistry;
+
+// 버퍼의 GPU 주소. 처음이면 cudaHostRegister(Mapped) 로 등록함 (페이지 고정 + GPU 주소 받기. 복사 없음)
+unsigned char* acquireCameraBuffer(const unsigned char* host, std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(cameraRegistryMutex);
+    for (CameraBufferRegistration& entry : cameraRegistry) {
+        if (entry.host != host) continue;
+        if (entry.bytes != bytes) throw std::runtime_error("같은 카메라 버퍼가 다른 길이로 들어옴");
+        ++entry.users;
+        return entry.device;
+    }
+    void* hostPointer = const_cast<unsigned char*>(host);
+    checkCuda(cudaHostRegister(hostPointer, bytes, cudaHostRegisterMapped), "cudaHostRegister(카메라 버퍼)");
+    void* devicePointer = nullptr;
+    const cudaError_t status = cudaHostGetDevicePointer(&devicePointer, hostPointer, 0);
+    if (status != cudaSuccess) {
+        cudaHostUnregister(hostPointer);
+        checkCuda(status, "cudaHostGetDevicePointer(카메라 버퍼)");
+    }
+    cameraRegistry.push_back({host, bytes, static_cast<unsigned char*>(devicePointer), 1});
+    return static_cast<unsigned char*>(devicePointer);
+}
+
+// 이 백엔드가 그 버퍼를 다 씀. 마지막 사용자면 등록을 품
+void releaseCameraBuffer(const unsigned char* host) {
+    std::lock_guard<std::mutex> lock(cameraRegistryMutex);
+    for (auto it = cameraRegistry.begin(); it != cameraRegistry.end(); ++it) {
+        if (it->host != host) continue;
+        if (--it->users == 0) {
+            cudaHostUnregister(const_cast<unsigned char*>(host));
+            cameraRegistry.erase(it);
+        }
+        return;
+    }
+}
+
 } // namespace
 
 // ------------------------------------------------------------
@@ -402,13 +454,21 @@ struct TensorRTBackend::Impl {
 
     // 프레임을 장치로 올리고 커널로 deviceInput 을 채움. stream 에 넣기만 함 (호출자가 sync)
     void runGpuLetterbox(const cv::Mat& image, const LetterboxGeometry& geometry);
-    // GPU 입력 텐서를 CPU 경로·기준 함수와 비교함 (sync 뒤에 부름)
-    void compareWithCpu(const cv::Mat& image);
+    // v2: 카메라 YUYV 버퍼의 roi 를 GPU 가 직접 읽어 deviceInput 을 채움 (업로드 없음). stream 에 넣기만 함
+    void runGpuLetterboxYuyv(const YuyvBuffer& yuyv, const cv::Rect& roi, const LetterboxGeometry& geometry);
+    // 계수표: 원본·resize 크기가 바뀔 때만 다시 만들어 올림 (v2 용. runGpuLetterbox 안 2) 단계와 같은 일)
+    void prepareTables(const cv::Size& source, const cv::Size& resized);
+    // GPU 입력 텐서를 CPU 경로·기준 함수와 비교함 (sync 뒤에 부름). yuyv 가 있으면 기준 함수를 YUYV 판으로 씀
+    void compareWithCpu(const cv::Mat& image, const YuyvBuffer* yuyv, const cv::Rect& roi);
+
+    // v2: 이 백엔드가 쓴 카메라 버퍼 (호스트 주소, GPU 주소). 지워질 때 등록을 품
+    std::vector<std::pair<const unsigned char*, unsigned char*>> cameraBuffers;
 
     ~Impl() {
         // 실행 중인 작업이 있으면 끝난 뒤에 지움
         if (stream) cudaStreamSynchronize(stream);
         if (checkedFrames > 0) printCheckSummary();
+        for (const auto& buffer : cameraBuffers) releaseCameraBuffer(buffer.first);
         if (deviceInput) cudaFree(deviceInput);
         if (deviceOutput) cudaFree(deviceOutput);
         if (hostInput) cudaFreeHost(hostInput);
@@ -473,8 +533,58 @@ void TensorRTBackend::Impl::runGpuLetterbox(const cv::Mat& image, const Letterbo
     checkCuda(launchLetterboxKernel(args, static_cast<float*>(deviceInput), stream), "letterbox 커널");
 }
 
+// v2 계수표: runGpuLetterbox 의 2) 단계와 같은 일 (v1 코드는 그대로 둠)
+void TensorRTBackend::Impl::prepareTables(const cv::Size& source, const cv::Size& resized) {
+    if (tables.source == source && tables.resized == resized) return;
+    tables = buildResizeTables(source, resized);
+    if (tables.columns.size() > deviceColumnCapacity) {
+        if (deviceColumns) cudaFree(deviceColumns);
+        deviceColumns = nullptr;
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&deviceColumns), tables.columns.size() * sizeof(int)), "cudaMalloc(columns)");
+        deviceColumnCapacity = tables.columns.size();
+    }
+    if (tables.rows.size() > deviceRowCapacity) {
+        if (deviceRows) cudaFree(deviceRows);
+        deviceRows = nullptr;
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&deviceRows), tables.rows.size() * sizeof(int)), "cudaMalloc(rows)");
+        deviceRowCapacity = tables.rows.size();
+    }
+    if (!tables.columns.empty()) {
+        checkCuda(cudaMemcpy(deviceColumns, tables.columns.data(), tables.columns.size() * sizeof(int), cudaMemcpyHostToDevice), "columns 업로드");
+    }
+    if (!tables.rows.empty()) {
+        checkCuda(cudaMemcpy(deviceRows, tables.rows.data(), tables.rows.size() * sizeof(int), cudaMemcpyHostToDevice), "rows 업로드");
+    }
+}
+
+// GPU 전처리 v2: 업로드 없이 커널 1번. 카메라 MMAP 버퍼를 GPU 가 직접 읽음
+void TensorRTBackend::Impl::runGpuLetterboxYuyv(const YuyvBuffer& yuyv, const cv::Rect& roi, const LetterboxGeometry& geometry) {
+    // 1) 이 버퍼의 GPU 주소. 각 버퍼를 처음 쓸 때 한 번 등록함 (버퍼 수는 드라이버가 정함. 등록 시간은 그 프레임의 gpu_pre 에 들어감)
+    unsigned char* device = nullptr;
+    for (const auto& buffer : cameraBuffers) {
+        if (buffer.first == yuyv.data) {
+            device = buffer.second;
+            break;
+        }
+    }
+    if (device == nullptr) {
+        device = acquireCameraBuffer(yuyv.data, yuyv.bufferBytes);
+        cameraBuffers.emplace_back(yuyv.data, device);
+    }
+
+    // 2) 계수표 (원본 = roi 크기)
+    prepareTables(roi.size(), geometry.resized);
+
+    // 3) 커널: 원본 픽셀을 읽을 때 YUYV → BGR 을 바로 계산하고 letterbox·RGB·/255 → TensorRT 입력 버퍼
+    LetterboxKernelArgs args = makeLetterboxArgs(tables, geometry, inputSize, device + static_cast<std::size_t>(roi.y) * yuyv.pitch, yuyv.pitch,
+                                                 deviceColumns, deviceRows);
+    args.sourceOffsetX = roi.x;
+    checkCuda(launchLetterboxYuyvKernel(args, static_cast<float*>(deviceInput), stream), "letterbox YUYV 커널");
+}
+
 // GPU 입력 텐서 vs CPU 경로 vs CPU 기준 함수. float 를 비트 단위로 비교함
-void TensorRTBackend::Impl::compareWithCpu(const cv::Mat& image) {
+// v2 면 CPU 경로 = cvtColor 로 만든 BGR(image) 의 letterbox + blob, 기준 함수 = 같은 YUYV 버퍼를 CPU 에서 같은 식으로
+void TensorRTBackend::Impl::compareWithCpu(const cv::Mat& image, const YuyvBuffer* yuyv, const cv::Rect& roi) {
     const std::size_t count = inputBytes / sizeof(float);
     checkGpu.resize(count);
     checkReference.resize(count);
@@ -486,7 +596,8 @@ void TensorRTBackend::Impl::compareWithCpu(const cv::Mat& image) {
     if (!blob.isContinuous() || blob.total() != count) throw std::runtime_error("확인용 blob 크기가 입력과 다름");
     const float* cpu = blob.ptr<float>();
 
-    letterboxBlobReference(image, inputSize, checkReference.data());
+    if (yuyv != nullptr) letterboxBlobReferenceYuyv(yuyv->data, yuyv->pitch, roi, inputSize, checkReference.data());
+    else letterboxBlobReference(image, inputSize, checkReference.data());
 
     auto compare = [count](const float* a, const float* b, CheckStats& stats) {
         long long different = 0;
@@ -525,7 +636,7 @@ void TensorRTBackend::Impl::printCheckSummary() const {
     line("GPU = 기준 함수     ", gpuVsReference);
     line("기준 함수 = CPU 경로", referenceVsCpu);
     if (referenceVsCpu.values > 0) {
-        std::cerr << "  → 이 장비 OpenCV 의 resize 가 일반 식과 다름 (HAL 등). 비트 일치 전제가 깨짐 → 21절 비교 기준(픽셀 차·박스)으로 봄\n";
+        std::cerr << "  → 이 장비 OpenCV 의 resize(v2 는 cvtColor 도)가 일반 식과 다름 (HAL 등). 비트 일치 전제가 깨짐 → 21절 비교 기준(픽셀 차·박스)으로 봄\n";
     } else if (gpuVsReference.values > 0) {
         std::cerr << "  → 기준 함수와 GPU 가 다름 = 커널·업로드 문제\n";
     } else if (gpuVsCpu.values == 0) {
@@ -672,6 +783,32 @@ TensorRTBackend::~TensorRTBackend() = default;
 // 두 경로는 "추론" 칸에 든 것이 달라서(H2D) 칸끼리 바로 비교하지 않음. Full + Crop YOLO 합·프레임 p50 으로 비교함
 
 std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTiming* timing) {
+    return runInference(image, nullptr, cv::Rect(), timing);
+}
+
+// v2 (--camera-zero-copy): image 는 같은 영역의 BGR (좌표 복원 크기·check 비교용). 입력 텐서는 YUYV 버퍼에서 만듦
+std::vector<Detection> TensorRTBackend::inferYuyv(const cv::Mat& image, const YuyvBuffer& yuyv, const cv::Rect& roi, InferenceTiming* timing) {
+    if (!impl_->gpuPreprocess) throw std::logic_error("YUYV 직접 입력은 --gpu-preprocess 백엔드만 받음");
+    // 버퍼 정보 검사. 틀린 값으로 커널을 돌리면 GPU 가 등록한 범위 밖을 읽음 (잘못 읽거나 CUDA 오류)
+    if (yuyv.data == nullptr || yuyv.width <= 0 || yuyv.height <= 0 || yuyv.width % 2 != 0) {
+        throw std::invalid_argument("YUYV 버퍼가 없거나 크기가 잘못됨 (폭은 양의 짝수여야 함)");
+    }
+    if (yuyv.pitch < static_cast<std::size_t>(yuyv.width) * 2) {
+        throw std::invalid_argument("YUYV 줄 간격이 폭 × 2 보다 작음");
+    }
+    // 커널이 읽는 끝 = 마지막 줄 시작 + 폭 × 2. 버퍼 길이(= 등록 길이)가 이보다 짧으면 마지막 줄에서 범위 밖으로 나감
+    const std::size_t requiredBytes = static_cast<std::size_t>(yuyv.height - 1) * yuyv.pitch + static_cast<std::size_t>(yuyv.width) * 2;
+    if (yuyv.bufferBytes < requiredBytes) {
+        throw std::invalid_argument("YUYV 버퍼 길이가 영상 크기보다 짧음");
+    }
+    if (roi.x < 0 || roi.y < 0 || roi.width <= 0 || roi.height <= 0 || roi.x + roi.width > yuyv.width || roi.y + roi.height > yuyv.height) {
+        throw std::invalid_argument("YUYV roi 가 버퍼 밖임");
+    }
+    if (roi.size() != image.size()) throw std::invalid_argument("YUYV roi 크기가 BGR image 와 다름");
+    return runInference(image, &yuyv, roi, timing);
+}
+
+std::vector<Detection> TensorRTBackend::runInference(const cv::Mat& image, const YuyvBuffer* yuyv, const cv::Rect& roi, InferenceTiming* timing) {
     Impl& t = *impl_;
 
     // 전처리
@@ -686,7 +823,8 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
         prepared.scale = geometry.scale;
         prepared.padX = geometry.padLeft;
         prepared.padY = geometry.padTop;
-        t.runGpuLetterbox(image, geometry);
+        if (yuyv != nullptr) t.runGpuLetterboxYuyv(*yuyv, roi, geometry);
+        else t.runGpuLetterbox(image, geometry);
         // 전처리 시간을 따로 재려고 여기서 기다림 (sync 1번 추가)
         checkCuda(cudaStreamSynchronize(t.stream), "GPU 전처리 sync");
     } else {
@@ -707,7 +845,7 @@ std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTim
     // --gpu-preprocess-check: 입력 텐서를 CPU 경로와 비교함 (측정 구간 밖)
     std::chrono::steady_clock::time_point inferenceStart = preprocessEnd;
     if (t.gpuPreprocess && t.gpuPreprocessCheck) {
-        t.compareWithCpu(image);
+        t.compareWithCpu(image, yuyv, roi);
         inferenceStart = std::chrono::steady_clock::now();
     }
 

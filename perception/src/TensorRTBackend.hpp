@@ -52,6 +52,8 @@ public:
     TensorRTBackend& operator=(const TensorRTBackend&) = delete;
 
     std::vector<Detection> infer(const cv::Mat& image, InferenceTiming* timing) override;
+    // v2 (--camera-zero-copy): 카메라 YUYV 버퍼를 GPU 가 직접 읽음. --gpu-preprocess 로 만든 백엔드만 받음
+    std::vector<Detection> inferYuyv(const cv::Mat& image, const YuyvBuffer& yuyv, const cv::Rect& roi, InferenceTiming* timing) override;
     bool usesGpuPreprocess() const override;
 
     // 실제로 쓰인 엔진 파일 경로와 빌드 여부 (run_summary 기록용)
@@ -61,6 +63,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    // infer / inferYuyv 공통 본문. yuyv 가 nullptr 이면 BGR image 경로 (CPU·v1), 아니면 YUYV 버퍼의 roi 를 읽음 (v2)
+    std::vector<Detection> runInference(const cv::Mat& image, const YuyvBuffer* yuyv, const cv::Rect& roi, InferenceTiming* timing);
 
     std::string enginePath_;
     bool engineWasBuilt_ = false;

@@ -1,8 +1,28 @@
 #pragma once
 
 #include <opencv2/core.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+
+/*
+ * 카메라 원본 YUYV 버퍼 (GPU 전처리 v2, adas --camera-zero-copy 에서만 채움)
+ *
+ * V4l2CameraSource 가 이 버퍼를 드라이버에 돌려주지 않고 들고 있는 동안(다음 read() 전까지)만 유효함
+ * GPU 가 이 버퍼를 복사 없이 직접 읽어 추론 입력을 만듦. CUDA 등록은 TensorRTBackend 가 함 (카메라 코드는 CUDA 를 모름)
+ *
+ * - data           : MMAP 버퍼 시작 주소. nullptr 이면 없음 (영상 파일·일반 카메라 모드)
+ * - bufferBytes    : MMAP 버퍼 전체 길이 (CUDA 등록 단위)
+ * - pitch          : 한 줄 바이트 (bytesperline. 640 폭이면 1280)
+ * - width / height : 픽셀 크기 (BGR image 와 같음)
+ */
+struct YuyvBuffer {
+    const unsigned char* data = nullptr;
+    std::size_t bufferBytes = 0;
+    std::size_t pitch = 0;
+    int width = 0;
+    int height = 0;
+};
 
 /*
  * captureTimestampNs가 어느 클럭에서 나온 값인지
@@ -76,4 +96,5 @@ struct Frame {
     CaptureTimestampSource captureTimestampSource = CaptureTimestampSource::VideoPts;
     std::int64_t droppedBySource = 0;
     std::int64_t droppedByApp = 0;
+    YuyvBuffer yuyv;   // GPU 전처리 v2 (--camera-zero-copy) 에서만 채움. 그 밖에는 data 가 nullptr
 };

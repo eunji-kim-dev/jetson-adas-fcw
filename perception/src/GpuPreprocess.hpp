@@ -17,3 +17,7 @@ cudaError_t uploadBlobLut(const float* lut256);
 // 커널 한 번: 출력 (1, 3, H, W) 의 픽셀마다 letterboxPixel() → 값표 → R·G·B 평면에 씀 (blobFromImage swapRB=true 순서)
 // stream 에 넣기만 하고 기다리지 않음. 실행 설정 오류는 돌려준 값으로 알림
 cudaError_t launchLetterboxKernel(const LetterboxKernelArgs& args, float* output, cudaStream_t stream);
+
+// v2 (--camera-zero-copy): 원본이 카메라 YUYV 버퍼(CUDA 등록한 MMAP 버퍼의 GPU 주소)인 커널. 픽셀마다 letterboxPixelYuyv()
+// 값표·출력 순서는 위 커널과 같음. stream 에 넣기만 하고 기다리지 않음
+cudaError_t launchLetterboxYuyvKernel(const LetterboxKernelArgs& args, float* output, cudaStream_t stream);

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "perception/Detection.hpp"
+#include "perception/Frame.hpp"
 
 #include <opencv2/core.hpp>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,7 @@
 // - resize / pad / blob : CPU letterbox 의 cv::resize, copyMakeBorder, blobFromImage
 // - pinnedCopy          : blob → pinned 버퍼 memcpy (TensorRT CPU 경로만)
 // - gpuPreprocess       : 프레임 업로드 + 커널 + sync 벽시계 (TensorRT --gpu-preprocess 경로만. 이때 preprocess 와 같은 값)
+//                         v2(--camera-zero-copy)는 업로드가 없어 커널 + sync 만임
 struct InferenceTiming {
     double preprocessMilliseconds = 0.0;
     double inferenceMilliseconds = 0.0;
@@ -59,6 +62,17 @@ public:
 
     // GPU 전처리 경로면 true. 이때 YoloDetector 는 Crop 을 clone 하지 않고 ROI 뷰로 넘김 (업로드가 행 간격을 받음)
     virtual bool usesGpuPreprocess() const { return false; }
+
+    // GPU 전처리 v2 (--camera-zero-copy): 카메라 YUYV 버퍼의 roi 영역을 GPU 가 직접 읽어 입력을 만듦 (업로드 없음)
+    // image 는 같은 영역의 BGR (cvtColor 결과). 좌표 복원 크기와 --gpu-preprocess-check 비교에만 씀
+    // roi 는 YUYV 버퍼 안의 좌표 (Full = 화면 전체, Crop = crop 창). GPU 전처리 백엔드(TensorRT)만 지원함
+    virtual std::vector<Detection> inferYuyv(const cv::Mat& image, const YuyvBuffer& yuyv, const cv::Rect& roi, InferenceTiming* timing = nullptr) {
+        (void)image;
+        (void)yuyv;
+        (void)roi;
+        (void)timing;
+        throw std::logic_error("이 백엔드는 카메라 YUYV 직접 입력(--camera-zero-copy)을 지원하지 않음");
+    }
 };
 
 /*

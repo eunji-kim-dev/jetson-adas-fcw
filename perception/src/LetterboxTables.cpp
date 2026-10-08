@@ -141,3 +141,27 @@ void letterboxBlobReference(const cv::Mat& bgr, const cv::Size& inputSize, float
         }
     }
 }
+
+void letterboxBlobReferenceYuyv(const unsigned char* yuyv, std::size_t pitch, const cv::Rect& roi, const cv::Size& inputSize, float* output) {
+    if (yuyv == nullptr || roi.width <= 0 || roi.height <= 0) throw std::invalid_argument("YUYV 기준 함수: 버퍼가 없거나 roi 가 비었음");
+    static const std::array<float, 256> lut = buildBlobLut();
+
+    const LetterboxGeometry geometry = computeLetterboxGeometry(roi.size(), inputSize);
+    const ResizeTables tables = buildResizeTables(roi.size(), geometry.resized);
+    LetterboxKernelArgs args = makeLetterboxArgs(tables, geometry, inputSize, yuyv + static_cast<std::size_t>(roi.y) * pitch, pitch,
+                                                 tables.columns.data(), tables.rows.data());
+    args.sourceOffsetX = roi.x;
+
+    // blobFromImage(swapRB=true) 와 같은 순서: R 평면, G 평면, B 평면
+    const std::size_t plane = static_cast<std::size_t>(inputSize.width) * static_cast<std::size_t>(inputSize.height);
+    for (int y = 0; y < inputSize.height; ++y) {
+        for (int x = 0; x < inputSize.width; ++x) {
+            unsigned char blue = 0, green = 0, red = 0;
+            letterboxPixelYuyv(args, x, y, blue, green, red);
+            const std::size_t index = static_cast<std::size_t>(y) * inputSize.width + x;
+            output[index] = lut[red];
+            output[plane + index] = lut[green];
+            output[2 * plane + index] = lut[blue];
+        }
+    }
+}

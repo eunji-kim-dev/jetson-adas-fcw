@@ -41,6 +41,11 @@ public:
 
     const std::string& devicePath() const { return devicePath_; }
 
+    // GPU 전처리 v2 (--camera-zero-copy). 켜면 read() 가 버퍼를 드라이버에 바로 돌려주지 않고 다음 read() 첫머리에 돌려줌
+    // 그동안 frame.yuyv 가 그 MMAP 버퍼를 가리켜 GPU 가 복사 없이 읽음. 들고 있는 1개를 뺀 나머지 버퍼로 촬영은 계속됨
+    // 캡처 스레드(ThreadedFrameSource)와 같이 쓰면 안 됨 — 처리 중에 다음 read() 가 불려 버퍼가 돌아감 (RunOptions 가 막음)
+    void setHoldBuffer(bool hold) { holdBuffer_ = hold; }
+
 private:
     struct MappedBuffer {
         void* start = nullptr;
@@ -63,4 +68,6 @@ private:
     std::vector<MappedBuffer> buffers_;
     bool streaming_;
     std::int64_t lastSequence_;   // 아직 한 장도 못 받았으면 -1
+    bool holdBuffer_ = false;     // setHoldBuffer
+    int heldIndex_ = -1;          // 다음 read() 때 드라이버에 돌려줄 버퍼 번호. 없으면 -1
 };

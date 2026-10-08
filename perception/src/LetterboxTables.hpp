@@ -36,3 +36,7 @@ LetterboxKernelArgs makeLetterboxArgs(const ResizeTables& tables, const Letterbo
 // CPU 기준 함수: GPU 커널과 같은 letterboxPixel() 로 NCHW RGB float 입력 텐서를 만듦 (output 은 3 × H × W 개)
 // letterbox() + blobFromImage(1/255, swapRB) 와 비트 단위로 같아야 함. 다르면 그 장비 OpenCV 가 일반 식과 다른 것 (HAL 등)
 void letterboxBlobReference(const cv::Mat& bgr, const cv::Size& inputSize, float* output);
+
+// v2 기준 함수: 카메라 YUYV 버퍼(호스트 주소)의 roi 영역으로 GPU 커널(letterboxPixelYuyv)과 같은 식의 입력 텐서를 만듦
+// cvtColor(YUV2BGR_YUYV) → letterbox() → blobFromImage 와 비트 단위로 같아야 함. 다르면 그 장비 OpenCV 의 색 변환·resize 가 일반 식과 다른 것
+void letterboxBlobReferenceYuyv(const unsigned char* yuyv, std::size_t pitch, const cv::Rect& roi, const cv::Size& inputSize, float* output);

@@ -50,3 +50,37 @@ cudaError_t launchLetterboxKernel(const LetterboxKernelArgs& args, float* output
     letterboxKernel<<<grid, block, 0, stream>>>(args, output);
     return cudaGetLastError();
 }
+
+namespace {
+
+// v2: 원본이 카메라 YUYV 버퍼. letterboxKernel 과 같고 원본 픽셀을 읽을 때만 색 변환함
+__global__ void letterboxYuyvKernel(LetterboxKernelArgs args, float* output) {
+    __shared__ float lut[256];
+    const int thread = threadIdx.y * blockDim.x + threadIdx.x;
+    lut[thread] = c_blobLut[thread];
+    __syncthreads();
+
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= args.outputWidth || y >= args.outputHeight) return;
+
+    unsigned char blue = 0;
+    unsigned char green = 0;
+    unsigned char red = 0;
+    letterboxPixelYuyv(args, x, y, blue, green, red);
+
+    const size_t plane = static_cast<size_t>(args.outputWidth) * static_cast<size_t>(args.outputHeight);
+    const size_t index = static_cast<size_t>(y) * static_cast<size_t>(args.outputWidth) + static_cast<size_t>(x);
+    output[index] = lut[red];
+    output[plane + index] = lut[green];
+    output[2 * plane + index] = lut[blue];
+}
+
+} // namespace
+
+cudaError_t launchLetterboxYuyvKernel(const LetterboxKernelArgs& args, float* output, cudaStream_t stream) {
+    const dim3 block(kBlockWidth, kBlockHeight);
+    const dim3 grid((args.outputWidth + kBlockWidth - 1) / kBlockWidth, (args.outputHeight + kBlockHeight - 1) / kBlockHeight);
+    letterboxYuyvKernel<<<grid, block, 0, stream>>>(args, output);
+    return cudaGetLastError();
+}

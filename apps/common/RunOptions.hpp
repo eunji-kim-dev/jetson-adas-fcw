@@ -54,6 +54,9 @@
  *   --gpu-preprocess           tensorrt_* 전용. 전처리(letterbox·RGB·/255)를 GPU 커널 한 번으로 함 (기본 꺼짐 = CPU 경로, golden 보존)
  *   --gpu-preprocess-check     --gpu-preprocess 와 같이 돌면서 프레임마다 GPU 입력 텐서를 CPU 경로와 비트 단위로 비교함
  *                              끝날 때 표준 에러로 요약을 냄 (확인용이라 느림. 측정에는 안 씀)
+ *   --camera-zero-copy         --camera 전용. GPU 전처리 v2: 카메라 MMAP 버퍼(YUYV)를 CUDA 에 등록해 GPU 가 복사 없이 직접 읽음
+ *                              --gpu-preprocess 를 같이 켬. --gpu-preprocess-check 와 같이 주면 v2 입력 텐서를 CPU 경로와 비교함
+ *                              --threaded-capture 와는 같이 못 씀 (버퍼를 다음 프레임까지 들고 있어야 함)
  */
 
 struct RunOptions {
@@ -93,6 +96,7 @@ struct RunOptions {
     std::optional<double> d0M;           // --d0-m (예약, 기록용)
     bool gpuPreprocess = false;          // --gpu-preprocess: TensorRT 입력을 GPU 커널로 만듦
     bool gpuPreprocessCheck = false;     // --gpu-preprocess-check: GPU 입력 텐서를 CPU 경로와 비교 (gpuPreprocess 도 켬)
+    bool cameraZeroCopy = false;         // --camera-zero-copy: 카메라 YUYV 버퍼를 GPU 가 직접 읽음 (GPU 전처리 v2, gpuPreprocess 도 켬)
 };
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
@@ -113,7 +117,7 @@ inline void printUsage(const std::string& programName) {
               << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge]"
               << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
               << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]"
-              << " [--gpu-preprocess | --gpu-preprocess-check]\n";
+              << " [--gpu-preprocess | --gpu-preprocess-check] [--camera-zero-copy]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -285,6 +289,9 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         } else if (argument == "--gpu-preprocess-check") {
             options.gpuPreprocess = true;
             options.gpuPreprocessCheck = true;
+        } else if (argument == "--camera-zero-copy") {
+            options.gpuPreprocess = true;
+            options.cameraZeroCopy = true;
         } else if (argument == "--ttc-mode") {
             if (!takeValue(i, argument, options.ttcMode)) return false;
             if (options.ttcMode != "proxy" && options.ttcMode != "homography" && options.ttcMode != "both") {
@@ -422,6 +429,18 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
     if (options.gpuPreprocess && options.backendName.rfind("tensorrt_", 0) != 0) {
         std::cerr << "[ERROR] --gpu-preprocess 는 tensorrt_* 백엔드에서만 씀: " << options.backendName << '\n';
         return false;
+    }
+    // GPU 전처리 v2 는 카메라 MMAP 버퍼를 처리가 끝날 때(다음 read())까지 들고 있어야 함
+    if (options.cameraZeroCopy) {
+        if (options.cameraDevice.empty()) {
+            std::cerr << "[ERROR] --camera-zero-copy 는 --camera 와 같이 줘야 함 (영상 파일에는 카메라 버퍼가 없음)\n";
+            return false;
+        }
+        // 캡처 스레드는 처리 중에 다음 프레임을 읽어 들고 있던 버퍼를 드라이버에 돌려줌 → GPU 가 읽는 중에 덮어써질 수 있음
+        if (options.threadedCapture) {
+            std::cerr << "[ERROR] --camera-zero-copy 는 --threaded-capture 와 같이 못 씀 (처리 중에 카메라 버퍼가 돌아감)\n";
+            return false;
+        }
     }
     return true;
 }

@@ -310,7 +310,7 @@ def main():
     print("frame age: capture_ts_clock == monotonic 인 run 에서만 계산 (영상 파일은 n/a)")
     print("drops: frame_seq 건너뜀 합. drop src = 카메라 쪽 누락, drop app = 프로그램 쪽 버림 (threaded). v5 미만 로그는 n/a")
     print("pre p50 = Full+Crop 전처리 합. resize·pad·blob·copy 는 그 안의 몫 (CPU 경로), clone = Crop clone (farYolo 안). v8 미만 로그는 n/a")
-    print("gpu pre = 업로드+커널+sync (--gpu-preprocess 경로, v9). CPU 경로는 n/a")
+    print("gpu pre = 업로드+커널+sync (--gpu-preprocess 경로, v9). gpu_zero_copy 는 업로드 없이 커널+sync. CPU 경로는 n/a")
     
     if len(results) > 1:
         print("\n== run 간 변동 (min / max / (max-min)/median) ==")

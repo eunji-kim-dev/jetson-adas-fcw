@@ -327,6 +327,8 @@ int main(int argc, char* argv[]) {
     PreprocessOptions preprocessOptions;
     preprocessOptions.gpu = options.gpuPreprocess;
     preprocessOptions.check = options.gpuPreprocessCheck;
+    // 카메라 입력을 detector 보다 먼저 선언함 → 끝날 때 detector(카메라 버퍼 CUDA 등록)가 먼저 지워지고 카메라 버퍼(munmap)는 나중에 풀림 (--camera-zero-copy)
+    std::unique_ptr<FrameSource> sourcePtr;
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
@@ -344,7 +346,8 @@ int main(int argc, char* argv[]) {
     YoloDetector& detector = *detectorPtr;
     std::cout << "[INFO] 추론 backend: " << backendName << '\n';
     std::cout << "[INFO] 전처리: " << (options.gpuPreprocessCheck ? "GPU 커널 + CPU 경로 비교 (--gpu-preprocess-check, 측정용 아님)"
-                                       : options.gpuPreprocess ? "GPU 커널 (--gpu-preprocess)" : "CPU (letterbox + blob)") << '\n';
+                                       : options.gpuPreprocess ? "GPU 커널 (--gpu-preprocess)" : "CPU (letterbox + blob)")
+              << (options.cameraZeroCopy ? " / 카메라 YUYV 버퍼를 GPU 가 직접 읽음 (--camera-zero-copy, v2)" : "") << '\n';
     if (options.cropModelPath.empty()) {
         std::cout << "[INFO] crop 추론: 전체 프레임과 같은 모델 (640x640)\n";
     } else {
@@ -354,10 +357,12 @@ int main(int argc, char* argv[]) {
     // 영상 입력은 FrameSource 인터페이스 뒤에 둠
     // --camera 면 V4L2 카메라, 아니면 영상 파일. --threaded-capture 면 그 위에 캡처 스레드를 씌움
     // 둘 다 없으면 예전과 같은 VideoFileSource 동기 경로 (golden 보존)
-    std::unique_ptr<FrameSource> sourcePtr;
     try {
         if (useCamera) {
-            sourcePtr = std::make_unique<V4l2CameraSource>(options.cameraDevice, 640, 480, 30.0);
+            auto camera = std::make_unique<V4l2CameraSource>(options.cameraDevice, 640, 480, 30.0);
+            // --camera-zero-copy: 버퍼를 다음 read() 까지 들고 있음 → captured.yuyv 를 GPU 가 직접 읽음 (GPU 전처리 v2)
+            camera->setHoldBuffer(options.cameraZeroCopy);
+            sourcePtr = std::move(camera);
         } else {
             sourcePtr = std::make_unique<VideoFileSource>(inputName);
         }
@@ -593,7 +598,9 @@ int main(int argc, char* argv[]) {
         runMetadata.cropInput = std::to_string(options.cropInputHeight) + "x" + std::to_string(options.cropInputWidth);
     }
     // 어느 전처리 경로로 나온 결과인지 run_summary 에 남김 (GPU 경로 비교용)
-    runMetadata.preprocess = options.gpuPreprocessCheck ? "gpu_check" : options.gpuPreprocess ? "gpu" : "cpu";
+    // --camera-zero-copy 면 gpu_zero_copy (check 와 같이 돌면 gpu_zero_copy_check)
+    runMetadata.preprocess = options.cameraZeroCopy ? (options.gpuPreprocessCheck ? "gpu_zero_copy_check" : "gpu_zero_copy")
+                           : options.gpuPreprocessCheck ? "gpu_check" : options.gpuPreprocess ? "gpu" : "cpu";
     // 영상별 ROI 가 달라지므로 어느 ROI 로 나온 결과인지 run_summary 에 남김
     if (options.laneRoiPx.empty()) {
         runMetadata.laneRoi = "default";
@@ -687,7 +694,8 @@ int main(int argc, char* argv[]) {
         DetectionTiming detectionTiming;
 
         try {
-            detections = detector.detect(frame, &detectionTiming);
+            // --camera-zero-copy: 이 프레임의 카메라 YUYV 버퍼를 같이 넘김 → Full·Crop 입력을 GPU 가 그 버퍼에서 직접 만듦 (v2)
+            detections = detector.detect(frame, &detectionTiming, options.cameraZeroCopy ? &captured.yuyv : nullptr);
         } catch (const std::exception& error) {
             std::cerr << "[ERROR] 객체 검출 실패: " << error.what() << '\n';
             return 1;

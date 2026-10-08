@@ -44,14 +44,17 @@ public:
     YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsThreshold, std::unique_ptr<InferenceBackend> farBackend = nullptr,
                  bool cropEdgeRule = false);
 
-    std::vector<Detection> detect(const cv::Mat& frame, DetectionTiming* timing = nullptr);
+    // yuyv 를 주면 (--camera-zero-copy) Full·Crop 입력을 BGR frame 대신 그 카메라 YUYV 버퍼에서 GPU 가 직접 만듦 (v2)
+    // frame 은 같은 프레임의 BGR 이라 crop 창 계산·좌표 복원은 그대로 frame 기준임. 안 주면(nullptr) 기존 경로
+    std::vector<Detection> detect(const cv::Mat& frame, DetectionTiming* timing = nullptr, const YuyvBuffer* yuyv = nullptr);
 
 private:
     // 화면 중앙 원거리 도로 영역 crop 보조 추론
     // cropRectOut 을 주면 이번 프레임에 쓴 crop 영역을 돌려줌 (crop 을 건너뛰면 빈 사각형 그대로)
     // cloneMilliseconds 에 Crop clone 시간을 씀 (clone 안 하면 그대로 둠)
+    // yuyv 를 주면 crop 창을 그 YUYV 버퍼에서 GPU 가 직접 읽음 (v2)
     std::vector<Detection> detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut = nullptr,
-                                                std::optional<double>* cloneMilliseconds = nullptr);
+                                                std::optional<double>* cloneMilliseconds = nullptr, const YuyvBuffer* yuyv = nullptr);
 
     std::unique_ptr<InferenceBackend> backend_;
     std::unique_ptr<InferenceBackend> farBackend_;   // 비어 있으면 backend_ 를 같이 씀

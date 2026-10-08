@@ -160,6 +160,20 @@ void V4l2CameraSource::stopStreaming() {
 bool V4l2CameraSource::read(Frame& frame) {
     if (fd_ < 0 || !streaming_) return false;
 
+    // --camera-zero-copy: 지난 프레임 버퍼를 이제 돌려줌. 그 프레임의 GPU 작업(전처리·추론)은 detect() 안의 sync 로 끝났음
+    if (heldIndex_ >= 0) {
+        v4l2_buffer held{};
+        held.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        held.memory = V4L2_MEMORY_MMAP;
+        held.index = static_cast<__u32>(heldIndex_);
+        heldIndex_ = -1;
+        frame.yuyv = YuyvBuffer();   // 돌려준 버퍼를 가리키지 않게 비움
+        if (xioctl(fd_, VIDIOC_QBUF, &held) < 0) {
+            std::cerr << "[ERROR] VIDIOC_QBUF(지난 프레임 반납) 실패: " << errnoText() << '\n';
+            return false;
+        }
+    }
+
     v4l2_buffer buffer{};
     // 프레임이 올 때까지 기다림. 30fps 면 33ms 안에 오므로 2초를 넘기면 카메라 이상으로 봄
     // 첫 프레임 뒤 약 1.3초 멈추는 구간(9/15 확인)이 있어 첫 두 장까지는 5초까지 기다림
@@ -204,7 +218,20 @@ bool V4l2CameraSource::read(Frame& frame) {
     const cv::Mat yuyv(height_, width_, CV_8UC2, buffers_[buffer.index].start, bytesPerLine_);
     cv::cvtColor(yuyv, frame.image, cv::COLOR_YUV2BGR_YUYV);
 
+    // --camera-zero-copy: 버퍼를 다음 read() 까지 들고 있음. GPU 가 이 MMAP 버퍼의 YUYV 를 직접 읽음
+    if (holdBuffer_) {
+        const MappedBuffer& mapped = buffers_[buffer.index];
+        frame.yuyv.data = static_cast<const unsigned char*>(mapped.start);
+        frame.yuyv.bufferBytes = mapped.length;
+        frame.yuyv.pitch = bytesPerLine_;
+        frame.yuyv.width = width_;
+        frame.yuyv.height = height_;
+        heldIndex_ = static_cast<int>(buffer.index);
+        return true;
+    }
+
     // 변환이 끝났으니 버퍼를 드라이버에 돌려줌
+    frame.yuyv = YuyvBuffer();
     if (xioctl(fd_, VIDIOC_QBUF, &buffer) < 0) {
         std::cerr << "[ERROR] VIDIOC_QBUF(반납) 실패: " << errnoText() << '\n';
         return false;

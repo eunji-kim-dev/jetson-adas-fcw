@@ -177,11 +177,14 @@ YoloDetector::YoloDetector(std::unique_ptr<InferenceBackend> backend, float nmsT
                            bool cropEdgeRule)
     : backend_(std::move(backend)), farBackend_(std::move(farBackend)), nmsThreshold_(nmsThreshold), cropEdgeRule_(cropEdgeRule) {}
 
-std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTiming* timing) {
+std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTiming* timing, const YuyvBuffer* yuyv) {
     // 기본 YOLO 검출
     // 전체 블랙박스 프레임에서 먼저 객체를 검출
+    // --camera-zero-copy 면 카메라 YUYV 버퍼에서 GPU 가 직접 입력을 만듦 (v2). frame 은 같은 프레임의 BGR
     const auto fullYoloStart = std::chrono::steady_clock::now();
-    std::vector<Detection> detections = backend_->infer(frame, timing != nullptr ? &timing->fullInference : nullptr);
+    InferenceTiming* fullTiming = timing != nullptr ? &timing->fullInference : nullptr;
+    std::vector<Detection> detections = yuyv != nullptr ? backend_->inferYuyv(frame, *yuyv, cv::Rect(0, 0, frame.cols, frame.rows), fullTiming)
+                                                         : backend_->infer(frame, fullTiming);
     const auto fullYoloEnd = std::chrono::steady_clock::now();
 
     // 전체 프레임에서는 너무 작아진 원거리 차량을
@@ -189,7 +192,7 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
     const auto farYoloStart = std::chrono::steady_clock::now();
     cv::Rect farCropRect;
     std::vector<Detection> farDetections = detectFarRoadObjects(frame, timing != nullptr ? &timing->farInference : nullptr, &farCropRect,
-                                                                timing != nullptr ? &timing->cropCloneMilliseconds : nullptr);
+                                                                timing != nullptr ? &timing->cropCloneMilliseconds : nullptr, yuyv);
     const auto farYoloEnd = std::chrono::steady_clock::now();
 
     const auto postprocessStart = std::chrono::steady_clock::now();
@@ -234,7 +237,7 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame, DetectionTimin
  * crop에서 나온 좌표는 다시 원본 프레임 좌표로 복원
  */
 std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, InferenceTiming* timing, cv::Rect* cropRectOut,
-                                                          std::optional<double>* cloneMilliseconds) {
+                                                          std::optional<double>* cloneMilliseconds, const YuyvBuffer* yuyv) {
     const int cropX = static_cast<int>(std::round(frame.cols * 0.25F));
     const int cropY = static_cast<int>(std::round(frame.rows * 0.38F));
     const int cropWidth = static_cast<int>(std::round(frame.cols * 0.50F));
@@ -265,7 +268,8 @@ std::vector<Detection> YoloDetector::detectFarRoadObjects(const cv::Mat& frame, 
             *cloneMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cloneStart).count();
         }
     }
-    std::vector<Detection> cropDetections = cropBackend.infer(crop, timing);
+    // --camera-zero-copy: crop 창을 카메라 YUYV 버퍼에서 GPU 가 직접 읽음 (v2). 이때 crop 은 위의 ROI 뷰 (clone 안 함)
+    std::vector<Detection> cropDetections = yuyv != nullptr ? cropBackend.inferYuyv(crop, *yuyv, cropRect, timing) : cropBackend.infer(crop, timing);
     std::vector<Detection> result;
 
     for (Detection detection : cropDetections) {

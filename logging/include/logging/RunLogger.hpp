@@ -37,7 +37,7 @@ struct RunMetadata {
     std::string fullCropStrategy;  // "full+crop_every_frame"
     std::string cropModel;         // crop 추론 모델 경로. 전체 프레임과 같은 모델이면 "same_as_model"
     std::string cropInput;         // crop 추론 입력 크기 "HxW". 기본 "640x640"
-    std::string preprocess;        // "cpu" / "gpu" / "gpu_check" (adas --gpu-preprocess). perception_demo 는 비움
+    std::string preprocess;        // "cpu" / "gpu" / "gpu_check" (adas --gpu-preprocess) / "gpu_zero_copy" / "gpu_zero_copy_check" (--camera-zero-copy). perception_demo 는 비움
     std::string laneRoi;           // "default" 또는 "x1,y1,...,x4,y4" (--lane-roi 픽셀 좌표)
     std::string leadRule;          // "none" 또는 "overlap,gap" 처럼 --lead-rule 목록 (adas). perception_demo 는 비움
     // TTR-H 실험 (adas --ttc-mode). perception_demo 는 비움. proxy 면 노면 값은 빈 칸·null
