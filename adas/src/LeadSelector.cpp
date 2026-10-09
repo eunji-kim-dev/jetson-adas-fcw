@@ -34,6 +34,7 @@ struct LaneOverlap {
     bool valid = false;         // 박스 아래 변이 lane 사다리꼴 세로 범위 안에 있음
     float ratio = 0.0F;         // 박스 가로 폭 중 lane 안에 든 비율 (0~1)
     float normalizedX = 0.5F;   // 접지점의 lane 안 위치. lane 밖이면 0 미만·1 초과 (클램프 안 함)
+    float width = 0.0F;         // 같은 높이의 차로 폭임. 원본 픽셀을 정규화 좌표로 바꿀 때 사용함
 };
 
 // 박스 아래 변 높이에서 lane 좌우 경계를 구해 박스–lane 가로 겹침을 계산함
@@ -55,6 +56,7 @@ LaneOverlap calculateLaneOverlap(const std::vector<cv::Point>& trapezoid, const 
     LaneOverlap result;
     result.valid = true;
     result.normalizedX = (static_cast<float>(groundPoint.x) - leftX) / (rightX - leftX);
+    result.width = rightX - leftX;
 
     const float boxLeft = static_cast<float>(box.x);
     const float boxRight = static_cast<float>(box.x + box.width);
@@ -106,12 +108,23 @@ void LeadSelector::reset() {
     geometryById_.clear();
     lastGeometryById_.clear();
     edgeSideClearFramesById_.clear();
+    backgroundShifts_.clear();
 }
 
 void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled,
-                          const std::unordered_map<int, ObservationState>* observations) {
+                          const std::unordered_map<int, ObservationState>* observations,
+                          const BackgroundMotionResult* backgroundMotion) {
     // 이력의 frame 값. 절대 프레임 번호가 아니라 호출 횟수지만 간격 계산에는 충분함
     ++frameIndex_;
+    if (rules_.turn && rules_.passby) {
+        const bool valid = backgroundMotion != nullptr && backgroundMotion->valid
+            && std::isfinite(backgroundMotion->dxPixels);
+        backgroundShifts_.push_back({frameIndex_, valid, valid ? backgroundMotion->dxPixels : 0.0F});
+        while (!backgroundShifts_.empty()
+               && frameIndex_ - backgroundShifts_.front().frame >= static_cast<int>(lateralHistorySize)) {
+            backgroundShifts_.pop_front();
+        }
+    }
     geometryById_.clear();
     std::unordered_map<int, float> leadScoreById;
     int proposedLeadId = -1;
@@ -284,6 +297,40 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
             const bool overlapDecreasing = overlapHistory.size() >= 2 && (overlapHistory.front().ratio - overlapHistory.back().ratio) >= passByOverlapDrop;
             passingBy = passingBy && overlapDecreasing;
         }
+        const bool passingByRaw = passingBy;
+        bool turnCorrectionUsed = false;
+        float correctedOutwardDrift = outwardDriftPerFrame;
+        float turnWindowDx = 0.0F;
+        // 최근 창에서 접지점이 차선 안에 있었던 기존 LEAD만 보정함
+        const bool recentlyInside = rules_.turn && std::any_of(lateralHistory.begin(), lateralHistory.end(),
+            [](const LateralSample& sample) { return sample.normalizedX >= 0.0F && sample.normalizedX <= 1.0F; });
+        // 후보·컷인·점수에는 원래 횡이동을 사용함
+        if (rules_.turn && rules_.passby && passingBy && recentlyInside && trackedObject.trackId == activeLeadId_
+            && laneCandidate && laneOverlap.valid && laneOverlap.width > 1.0F
+            && lateralHistory.size() >= 4 && lateralHistory.back().frame == frameIndex_) {
+            const int firstFrame = lateralHistory.front().frame;
+            const int lastFrame = lateralHistory.back().frame;
+            int expectedFrame = firstFrame + 1;
+            bool complete = true;
+            for (const BackgroundShift& shift : backgroundShifts_) {
+                if (shift.frame <= firstFrame || shift.frame > lastFrame) continue;
+                if (shift.frame != expectedFrame || !shift.valid) { complete = false; break; }
+                turnWindowDx += shift.dxPixels;
+                ++expectedFrame;
+            }
+            complete = complete && expectedFrame == lastFrame + 1;
+            const float recentX = lateralHistory.back().normalizedX;
+            // 바깥쪽 이동과 같은 방향인 배경 이동만 공제함
+            if (complete && turnWindowDx * (recentX - 0.5F) > 0.0F) {
+                const float correctedX = recentX - turnWindowDx / laneOverlap.width;
+                const float pastOffset = std::abs(lateralHistory.front().normalizedX - 0.5F);
+                correctedOutwardDrift = (std::abs(correctedX - 0.5F) - pastOffset)
+                    / static_cast<float>(lastFrame - firstFrame);
+                turnCorrectionUsed = true;
+                passingBy = correctedOutwardDrift > maximumLateralDriftPerFrame;
+            }
+            if (!turnCorrectionUsed) turnWindowDx = 0.0F;
+        }
         const bool cuttingIn = outwardDriftPerFrame < -maximumLateralDriftPerFrame;
         const int requiredStreak = cuttingIn ? cutInEligibilityFrames_ : leadEligibilityFrames_;
         float leadScore = -std::numeric_limits<float>::infinity();
@@ -312,6 +359,11 @@ void LeadSelector::update(const std::vector<TrackedObject>& trackedObjects, bool
         geometryById_[trackedObject.trackId] = {groundPoint, insideRoad, lanePosition.inside, laneHeld, lanePosition.normalizedX, leadScore, passingBy, laneOverlap.ratio};
         {
             ObjectGeometry& geometry = geometryById_[trackedObject.trackId];
+            geometry.passingByRaw = passingByRaw;
+            geometry.turnCorrectionUsed = turnCorrectionUsed;
+            geometry.rawOutwardDrift = outwardDriftPerFrame;
+            geometry.correctedOutwardDrift = correctedOutwardDrift;
+            geometry.turnWindowDx = turnWindowDx;
             geometry.rankPenalty = rankPenalty;
             geometry.laneCandidate = laneCandidate;   // ★
             geometry.laneStreak = laneStreak;         // ★

@@ -13,6 +13,7 @@ results/*.avi
 results/*.mp4
 results/*_frames.csv
 results/videos_negative/
+results/*_turn.csv
 
 # 실행 로그 (raw_frame_log.csv / run_summary.json)
 results/runs/

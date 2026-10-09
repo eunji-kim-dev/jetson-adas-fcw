@@ -517,8 +517,24 @@ int main(int argc, char* argv[]) {
         else if (rule == "edge") leadRules.edge = true;
         else if (rule == "bottom") leadRules.bottom = true;
         else if (rule == "rawconfirm") rawConfirmRule = true;
+        else if (rule == "turn") leadRules.turn = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
+    }
+    if (leadRules.turn && !leadRules.passby) {
+        std::cerr << "[ERROR] turn은 passby와 같이 사용해야 함\n";
+        return 1;
+    }
+    BackgroundMotionEstimator backgroundMotionEstimator;
+    std::ofstream turnCsv;
+    if (leadRules.turn && options.diagLog) {
+        turnCsv.open("results/" + inputStem + "_turn.csv");
+        if (!turnCsv.is_open()) {
+            std::cerr << "[ERROR] turn 진단 로그 생성 실패\n";
+            return 1;
+        }
+        turnCsv << "frame,trackId,motionValid,dxPixels,leftCount,rightCount,leftDxPixels,rightDxPixels,"
+                   "windowDx,rawDrift,correctedDrift,correctionUsed,passingByRaw,passingBy,held,isLead,motionMs,motionState\n";
     }
     if (leadRuleText.empty()) leadRuleText = "none";
     std::cout << "[INFO] LEAD 규칙: " << (options.leadRules.empty() ? "기본 (접지점 lane 안 후보, 60% 게이트)" : leadRuleText) << '\n';
@@ -677,6 +693,7 @@ int main(int argc, char* argv[]) {
 
             // 새 장면에서는 이전 장면의 LEAD/lane 체류/횡이동 이력을 사용하지 않음
             leadSelector.reset();
+            backgroundMotionEstimator.reset();
             // 이전 장면의 Kalman Track과 TTC-P 이력을 새 장면으로 넘기지 않음
             // nextTrackId_는 tracker.reset() 안에서 유지되어 ID는 실행 전체에서 유일함
             tracker.reset(); riskAnalyzer.reset();
@@ -721,9 +738,19 @@ int main(int argc, char* argv[]) {
         const std::vector<TrackedObject> trackedObjects = tracker.update(detections);
         const auto trackingEnd = std::chrono::steady_clock::now();
 
+        // 박스·ROI·글씨를 그리기 전의 원본 프레임으로 배경 이동을 추정함
+        BackgroundMotionResult backgroundMotion;
+        double backgroundMotionMs = 0.0;
+        if (leadRules.turn) {
+            const auto motionStart = std::chrono::steady_clock::now();
+            backgroundMotion = backgroundMotionEstimator.update(frame, detections, trackedObjects);
+            backgroundMotionMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - motionStart).count();
+        }
         // hold/bonnet: 관측 분류를 LEAD 선택보다 먼저 함. 두 규칙이 꺼져 있으면 빈 목록이라 기존 동작
         riskAnalyzer.classifyObservations(trackedObjects, processedFrames);
-        leadSelector.update(trackedObjects, riskAnalysisEnabled, &riskAnalyzer.observationStates());
+        leadSelector.update(trackedObjects, riskAnalysisEnabled, &riskAnalyzer.observationStates(),
+                            leadRules.turn ? &backgroundMotion : nullptr);
         const int activeLeadId = leadSelector.activeLeadId();
         const std::unordered_map<int, ObjectGeometry>& geometryById = leadSelector.geometryById();
 
@@ -1149,6 +1176,28 @@ int main(int argc, char* argv[]) {
                         << RiskAnalyzer::toString(homographyWarningPolicy.bannerLevel());
             }
             diagCsv << '\n';
+        }
+
+        // turn 로그는 측정 종료 뒤에 기록함. 차량이 없어도 배경 추정 결과 한 행을 남김
+        if (turnCsv.is_open()) {
+            const auto writeTurnRow = [&](int trackId, const ObjectGeometry& g) {
+                turnCsv << processedFrames << ',' << trackId << ',' << (backgroundMotion.valid ? 1 : 0) << ','
+                        << backgroundMotion.dxPixels << ',' << backgroundMotion.leftCount << ',' << backgroundMotion.rightCount << ','
+                        << backgroundMotion.leftDxPixels << ',' << backgroundMotion.rightDxPixels << ','
+                        << g.turnWindowDx << ',' << g.rawOutwardDrift << ',' << g.correctedOutwardDrift << ','
+                        << (g.turnCorrectionUsed ? 1 : 0) << ',' << (g.passingByRaw ? 1 : 0) << ','
+                        << (g.passingBy ? 1 : 0) << ',' << (g.held ? 1 : 0) << ','
+                        << (trackId >= 0 && trackId == activeLeadId ? 1 : 0) << ',' << backgroundMotionMs << ',' << backgroundMotion.state << '\n';
+            };
+            bool wroteVehicle = false;
+            for (const TrackedObject& object : trackedObjects) {
+                const auto it = geometryById.find(object.trackId);
+                if (isVehicleClass(object.classId) && it != geometryById.end()) {
+                    writeTurnRow(object.trackId, it->second);
+                    wroteVehicle = true;
+                }
+            }
+            if (!wroteVehicle) writeTurnRow(-1, ObjectGeometry{});
         }
 
         // --measured-frames: warmup + 측정 프레임 수를 채우면 정지 (반복 측정용)

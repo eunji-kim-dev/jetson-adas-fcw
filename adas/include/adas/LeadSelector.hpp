@@ -2,6 +2,7 @@
 
 #include "perception/Detection.hpp"
 #include "adas/RiskAnalyzer.hpp"
+#include "adas/BackgroundMotion.hpp"
 
 #include <opencv2/core.hpp>
 #include <deque>
@@ -38,6 +39,13 @@ struct ObjectGeometry {
     int laneStreak = 0;           // 후보 연속 체류 프레임 (gap·held 면 동결값)
     int requiredStreak = 0;       // LEAD 자격에 필요한 체류 (컷인이면 짧음)
     bool eligible = false;        // laneCandidate && 차량 클래스 && laneStreak >= requiredStreak
+
+    // turn 진단값임. 후보 선정과 TTC 계산에는 사용하지 않음
+    bool passingByRaw = false;
+    bool turnCorrectionUsed = false;
+    float rawOutwardDrift = 0.0F;
+    float correctedOutwardDrift = 0.0F;
+    float turnWindowDx = 0.0F;
 };
 
 /*
@@ -81,6 +89,8 @@ struct LeadRuleFlags {
     bool rank = false;
     bool edge = false;
     bool bottom = false;
+    // turn: 신뢰 가능한 수평 배경 이동을 기존 LEAD의 passingBy에서만 보정함. passby와 같이 사용함
+    bool turn = false;
 };
 
 /*
@@ -104,7 +114,8 @@ public:
     // analysisEnabled=false(장면 전환 워밍업)면 LEAD를 선택하지 않음
     // observations: RiskAnalyzer::classifyObservations() 의 이번 프레임 판정. nullptr 이거나 비어 있으면 기존 동작
     void update(const std::vector<TrackedObject>& trackedObjects, bool analysisEnabled,
-                const std::unordered_map<int, ObservationState>* observations = nullptr);
+                const std::unordered_map<int, ObservationState>* observations = nullptr,
+                const BackgroundMotionResult* backgroundMotion = nullptr);
 
     // 장면 전환 시 lane 체류/횡이동 이력과 LEAD 선택을 초기화
     void reset();
@@ -137,6 +148,13 @@ private:
     };
 
     int frameIndex_ = 0;   // update() 가 불릴 때마다 1 증가. 이력의 frame 값 기준
+    struct BackgroundShift {
+        int frame;
+        bool valid;
+        float dxPixels;
+    };
+    // held·미관측 프레임도 포함한 프레임별 배경 이동 이력임
+    std::deque<BackgroundShift> backgroundShifts_;
     std::unordered_map<int, std::deque<LateralSample>> lateralHistoryById_;
     std::unordered_map<int, std::deque<OverlapSample>> overlapHistoryById_;
     // gap: 트랙이 연속으로 안 보인 프레임 수. 3 을 넘으면 위 이력을 지움

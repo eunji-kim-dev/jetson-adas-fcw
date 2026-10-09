@@ -39,7 +39,8 @@
  *   --int8-shuffle-seed <n>    calibration 이미지 순서를 시드 n 으로 섞음. --int8-variant 와 같이 줘야 함
  *   --int8-fp32-head           검출 헤드(/model.22/) 층을 FP32 로 강제. --int8-variant 와 같이 줘야 함
  *   --lead-rule <목록>          LEAD 선택·경고 게이트 규칙 플래그. 쉼표로 이어 줌 (예: --lead-rule overlap,gap)
- *                              overlap | history | gap | passby | gate | bonnet | hold | rank | bottom | edge | cropedge | rawconfirm
+ *                              overlap | history | gap | passby | gate | bonnet | hold | rank | bottom | edge | cropedge | rawconfirm | turn
+ *                              turn: passby와 함께 사용함. 기존 LEAD의 passingBy에서 수평 배경 이동을 보정함
  *                              rawconfirm: TTC-P 배너의 새 DANGER를 현재 원시 위험 관측 3회로 확정함. 이미 확정한 경고의 안정화 유지와 CAUTION은 기존 정책을 씀
  *                              생략하면 기존 규칙 그대로 (golden 보존). adas 전용, perception_demo 는 무시함
  *   --ttc-mode <모드>           proxy (기본, golden 보존) | homography | both. TTR-H 실험 (5-2). adas 전용, 영상 파일 입력만 (--camera·--threaded-capture 불가)
@@ -102,7 +103,7 @@ struct RunOptions {
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
 inline const std::vector<std::string>& leadRuleNames() {
-    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank", "bottom", "edge", "cropedge", "rawconfirm"};
+    static const std::vector<std::string> names = {"overlap", "history", "gap", "passby", "gate", "bonnet", "hold", "rank", "bottom", "edge", "cropedge", "rawconfirm", "turn"};
     return names;
 }
 
@@ -115,7 +116,7 @@ inline void printUsage(const std::string& programName) {
               << " [--calib-list TXT] [--crop-calib-list TXT]"
               << " [--camera /dev/videoN] [--threaded-capture]"
               << " [--int8-variant NAME [--int8-calibrator entropy|minmax] [--int8-shuffle-seed N] [--int8-fp32-head]]"
-              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge,rawconfirm]"
+              << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge,rawconfirm,turn]"
               << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
               << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]"
               << " [--gpu-preprocess | --gpu-preprocess-check] [--camera-zero-copy]\n";
