@@ -23,10 +23,12 @@ public:
     // 화면 기하 조건을 통과하지 못한 위험 단계를 Safe로 되돌린다
     RiskResult applyGeometryGate(const RiskResult& rawRisk, const ObjectGeometry& geometry, bool isLeadTarget) const;
 
-    // 한 프레임의 LEAD 위험 상태로 배너 연속 확인/유지 카운터를 갱신
-    // observationHeld: hold/bonnet 보존 프레임. 카운터를 올리지도 지우지도 않음. 생략하면 기존 동작
+    // 한 프레임의 LEAD 위험 상태로 배너 연속 확인/유지 카운터를 갱신함
+    // observationHeld: hold/bonnet 보존 프레임임. 카운터를 올리지도 지우지도 않음
+    // rawConfirm: 현재 원시 위험 관측 3회로 새 DANGER를 확정함. 기본 false라 기존 동작을 유지함
+    // rawDangerObserved: 이번 관측이 유효하고 원시 DANGER이며 기하 게이트도 통과했음을 뜻함
     void update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel,
-                bool observationHeld = false);
+                bool observationHeld = false, bool rawConfirm = false, bool rawDangerObserved = false);
 
     // 장면 전환 시 이전 장면의 경고 상태를 즉시 제거
     void reset();
@@ -50,4 +52,6 @@ private:
     int cautionCandidateFrames_ = 0;
     int dangerCandidateFrames_ = 0;
     int warningCandidateLeadId_ = -1;
+    // rawconfirm: 원시 위험 3회로 실제 배너를 켠 차량임. 안정화된 단계는 이 차량의 경고 유지에만 씀
+    int dangerConfirmedLeadId_ = -1;
 };

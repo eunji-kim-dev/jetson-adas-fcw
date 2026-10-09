@@ -503,6 +503,7 @@ int main(int argc, char* argv[]) {
     // --lead-rule 플래그. 없으면 전부 false = 기존 규칙 (golden 보존)
     // 이름 목록은 RunOptions 에서 이미 검사됐음. 표기용 문자열은 run_summary 의 lead_rule 에도 그대로 씀
     LeadRuleFlags leadRules;
+    bool rawConfirmRule = false;   // TTC-P 새 배너를 원시 위험 3회로 확정함. 기본 꺼짐임
     std::string leadRuleText;
     for (const std::string& rule : options.leadRules) {
         if (rule == "overlap") leadRules.overlap = true;
@@ -515,6 +516,7 @@ int main(int argc, char* argv[]) {
         else if (rule == "rank") leadRules.rank = true;
         else if (rule == "edge") leadRules.edge = true;
         else if (rule == "bottom") leadRules.bottom = true;
+        else if (rule == "rawconfirm") rawConfirmRule = true;
         if (!leadRuleText.empty()) leadRuleText += ',';
         leadRuleText += rule;
     }
@@ -730,7 +732,8 @@ int main(int argc, char* argv[]) {
 
         int objectsOnRoad = 0, objectsInEgoLane = 0;
         RiskResult leadRisk;
-        RiskResult leadHomographyRisk;   // TTR-H 모드: LEAD 의 H 단계(게이트 뒤). level·ttcSeconds 가 H 값
+        bool leadRawDangerObserved = false;   // 이번 프레임의 유효한 원시 DANGER 관측임
+        RiskResult leadHomographyRisk;  // TTR-H 모드: LEAD 의 H 단계(게이트 뒤). level·ttcSeconds 가 H 값
         bool leadRiskFound = false;
         diagRows.clear();
 
@@ -784,11 +787,20 @@ int main(int argc, char* argv[]) {
                                     isLeadTarget, geometry.laneOverlap, geometry.passingBy,
                                     homographyMode && homographyRisk.level != rawRisk.hLevel});
             }
-
             if (isLeadTarget) {
                 leadRisk = risk;
                 leadHomographyRisk = homographyRisk;
                 leadRiskFound = true;
+
+                // 안정화 단계가 아직 SAFE여도 현재 원시 DANGER는 기하 조건을 별도로 검사함
+                // held나 무효 TTC는 새 위험 관측으로 세지 않음
+                if (rawConfirmRule && !rawRisk.observationHeld && rawRisk.valid
+                    && std::isfinite(rawRisk.ttcSeconds) && rawRisk.rawLevel == RiskLevel::Danger) {
+                    RiskResult rawDangerInput = rawRisk;
+                    rawDangerInput.level = rawRisk.rawLevel;
+                    const RiskResult rawDangerRisk = warningPolicy.applyGeometryGate(rawDangerInput, geometry, isLeadTarget);
+                    leadRawDangerObserved = rawDangerRisk.valid && rawDangerRisk.level == RiskLevel::Danger;
+                }
             }
 
             // bonnet 규칙: 보닛 모양 박스(확정 전 보존 프레임 포함)는 결과 영상에 안 그림. LEAD 는 그대로 그림. 판정·CSV·로그에는 영향 없음
@@ -868,7 +880,8 @@ int main(int argc, char* argv[]) {
 
         riskAnalyzer.removeStaleTracks(processedFrames);
 
-        warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level, leadRisk.observationHeld);
+        warningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadRisk.level,
+                             leadRisk.observationHeld, rawConfirmRule, leadRawDangerObserved);
         // TTR-H 배너. 카운터를 P 와 공유하지 않음. hold/bonnet 보존 프레임은 P 와 같이 카운터를 동결함
         if (homographyMode) {
             homographyWarningPolicy.update(riskAnalysisEnabled, sceneChanged, leadRiskFound, activeLeadId, leadHomographyRisk.level, leadRisk.observationHeld);

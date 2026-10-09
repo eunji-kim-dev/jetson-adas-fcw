@@ -41,6 +41,7 @@ void WarningPolicy::reset() {
     cautionCandidateFrames_ = 0;
     dangerCandidateFrames_ = 0;
     warningCandidateLeadId_ = -1;
+    dangerConfirmedLeadId_ = -1;
 }
 
 RiskLevel WarningPolicy::bannerLevel() const {
@@ -80,21 +81,54 @@ RiskResult WarningPolicy::applyGeometryGate(const RiskResult& rawRisk, const Obj
  * 새 화면에 차량이 없는데 이전 장면의 경고가 남는 현상이 사라짐
  */
 void WarningPolicy::update(bool analysisEnabled, bool sceneChanged, bool leadRiskFound, int activeLeadId, RiskLevel leadLevel,
-                           bool observationHeld) {
+                           bool observationHeld, bool rawConfirm, bool rawDangerObserved) {
     if (!analysisEnabled || sceneChanged) {
         reset();
     } else if (leadRiskFound && activeLeadId >= 0) {
-        // 선행 차량 ID가 바뀌면 이전 차량에서 쌓인
-        // 위험 연속 프레임 수를 이어받지 않음
+        // 다른 차량의 위험 관측 횟수와 확정 상태를 이어받지 않음
         if (warningCandidateLeadId_ != activeLeadId) {
             warningCandidateLeadId_ = activeLeadId;
             cautionCandidateFrames_ = 0; dangerCandidateFrames_ = 0;
+            dangerConfirmedLeadId_ = -1;
         }
 
         if (observationHeld) {
-            // hold/bonnet 보존 프레임: 위험 관측 1회로 세지도, 연속을 끊지도 않음. 떠 있는 배너의 유지 시간만 줄어듦
+            // 보존 프레임은 새 관측으로 세지 않음. 떠 있는 배너의 유지 시간만 줄임
             if (dangerHoldRemaining_ > 0) --dangerHoldRemaining_;
             if (cautionHoldRemaining_ > 0) --cautionHoldRemaining_;
+            if (dangerHoldRemaining_ == 0) dangerConfirmedLeadId_ = -1;
+        } else if (rawConfirm) {
+            // 새 배너의 근거는 현재 원시 DANGER임. 안정화로 남은 DANGER는 횟수에 넣지 않음
+            if (rawDangerObserved) ++dangerCandidateFrames_;
+            else dangerCandidateFrames_ = 0;
+
+            const bool newDangerConfirmed = dangerCandidateFrames_ >= dangerConfirmationFrames;
+            // 이미 같은 차량에서 켠 경고는 기존 안정화된 DANGER로 유지함
+            // 미확정 차량이나 유지 시간이 끝난 경고는 이 경로로 새로 켜지지 않음
+            const bool keepConfirmedDanger = dangerConfirmedLeadId_ == activeLeadId
+                && dangerHoldRemaining_ > 0 && leadLevel == RiskLevel::Danger;
+
+            if (newDangerConfirmed || keepConfirmedDanger) {
+                dangerConfirmedLeadId_ = activeLeadId;
+                dangerHoldRemaining_ = warningHoldFrames_;
+                cautionHoldRemaining_ = 0;
+                cautionCandidateFrames_ = 0;
+            } else {
+                // 원시 DANGER를 새로 세는 동안에는 떠 있는 DANGER 배너의 유지 시간을 줄이지 않음
+                if (dangerHoldRemaining_ > 0 && !rawDangerObserved) --dangerHoldRemaining_;
+                if (dangerHoldRemaining_ == 0) dangerConfirmedLeadId_ = -1;
+
+                // CAUTION은 기존 분기와 같음: 안정화 CAUTION 8회로 확정하고, 안정화 DANGER 동안은 유지 시간을 그대로 둠
+                if (leadLevel == RiskLevel::Caution) {
+                    ++cautionCandidateFrames_;
+                    if (cautionCandidateFrames_ >= cautionConfirmationFrames) {
+                        cautionHoldRemaining_ = warningHoldFrames_;
+                    }
+                } else {
+                    cautionCandidateFrames_ = 0;
+                    if (leadLevel != RiskLevel::Danger && cautionHoldRemaining_ > 0) --cautionHoldRemaining_;
+                }
+            }
         } else if (leadLevel == RiskLevel::Danger) {
             ++dangerCandidateFrames_; cautionCandidateFrames_ = 0;
             if (dangerCandidateFrames_ >= dangerConfirmationFrames) { dangerHoldRemaining_ = warningHoldFrames_; cautionHoldRemaining_ = 0; }
@@ -109,6 +143,7 @@ void WarningPolicy::update(bool analysisEnabled, bool sceneChanged, bool leadRis
         }
     } else {
         warningCandidateLeadId_ = -1; cautionCandidateFrames_ = 0; dangerCandidateFrames_ = 0;
+        dangerConfirmedLeadId_ = -1;
         if (dangerHoldRemaining_ > 0) --dangerHoldRemaining_;
         if (cautionHoldRemaining_ > 0) --cautionHoldRemaining_;
     }
