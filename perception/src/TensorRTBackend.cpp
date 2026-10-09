@@ -1,5 +1,6 @@
 #include "TensorRTBackend.hpp"
 
+#include "GpuPostprocess.hpp"
 #include "GpuPreprocess.hpp"
 #include "LetterboxTables.hpp"
 
@@ -451,6 +452,7 @@ struct TensorRTBackend::Impl {
     CheckStats referenceVsCpu;    // 기준 함수 vs CPU 경로 → 다르면 이 장비 OpenCV 가 일반 식과 다름 (HAL 등)
     std::vector<float> checkGpu;
     std::vector<float> checkReference;
+    float checkThreshold = 0.0F;   // --gpu-postprocess-check 의 CPU 경로 비교에 쓰는 신뢰도 문턱 (생성자가 채움)
 
     // 프레임을 장치로 올리고 커널로 deviceInput 을 채움. stream 에 넣기만 함 (호출자가 sync)
     void runGpuLetterbox(const cv::Mat& image, const LetterboxGeometry& geometry);
@@ -464,10 +466,37 @@ struct TensorRTBackend::Impl {
     // v2: 이 백엔드가 쓴 카메라 버퍼 (호스트 주소, GPU 주소). 지워질 때 등록을 품
     std::vector<std::pair<const unsigned char*, unsigned char*>> cameraBuffers;
 
+    // GPU 후처리 (--gpu-postprocess). 커널 결과 버퍼 = records(후보 N 개 × YoloCandidate) 뒤에 flags(N 바이트). 장치·호스트(pinned) 한 쌍
+    bool gpuPostprocess = false;
+    bool gpuPostprocessCheck = false;
+    YoloOutputLayout outputLayout;          // 출력 텐서 (1, C, N) 읽는 자리
+    unsigned char* deviceScan = nullptr;
+    unsigned char* hostScan = nullptr;
+    std::size_t scanBytes = 0;
+    cudaEvent_t eventInferenceDone = nullptr;    // enqueue 뒤 (후처리 커널 앞)
+    cudaEvent_t eventPostprocessDone = nullptr;  // 커널 + D2H 뒤. 둘 사이가 gpuPostprocess 시간
+    YoloCandidate* deviceRecords() const { return reinterpret_cast<YoloCandidate*>(deviceScan); }
+    unsigned char* deviceFlags() const { return deviceScan + static_cast<std::size_t>(outputLayout.columns) * sizeof(YoloCandidate); }
+    const YoloCandidate* hostRecords() const { return reinterpret_cast<const YoloCandidate*>(hostScan); }
+    const unsigned char* hostFlags() const { return hostScan + static_cast<std::size_t>(outputLayout.columns) * sizeof(YoloCandidate); }
+
+    // --gpu-postprocess-check: 후보 목록 비교 한 종류의 집계 (다른 프레임 수, 다른 후보 수)
+    struct PostCheckStats {
+        long long frames = 0;
+        long long candidates = 0;
+    };
+    long long postCheckedFrames = 0;
+    PostCheckStats postGpuVsCpu;          // GPU 후보 목록 vs CPU 경로 (cv::minMaxLoc)
+    PostCheckStats postGpuVsReference;    // GPU vs CPU 기준 함수 (같은 scanYoloCandidate 를 CPU 로) → 다르면 커널·D2H 문제
+    PostCheckStats postReferenceVsCpu;    // 기준 함수 vs CPU 경로 → 다르면 이 장비 cv::minMaxLoc 이 "같은 값이면 앞 인덱스" 규칙과 다름
+    // GPU 후보 목록을 CPU 경로·기준 함수와 비교함 (sync 뒤에 부름. 출력 텐서 전체를 D2H 하므로 느림)
+    void comparePostprocessWithCpu(const std::vector<YoloCandidate>& gpu);
+
     ~Impl() {
         // 실행 중인 작업이 있으면 끝난 뒤에 지움
         if (stream) cudaStreamSynchronize(stream);
         if (checkedFrames > 0) printCheckSummary();
+        if (postCheckedFrames > 0) printPostCheckSummary();
         for (const auto& buffer : cameraBuffers) releaseCameraBuffer(buffer.first);
         if (deviceInput) cudaFree(deviceInput);
         if (deviceOutput) cudaFree(deviceOutput);
@@ -476,12 +505,17 @@ struct TensorRTBackend::Impl {
         if (deviceFrame) cudaFree(deviceFrame);
         if (deviceColumns) cudaFree(deviceColumns);
         if (deviceRows) cudaFree(deviceRows);
+        if (deviceScan) cudaFree(deviceScan);
+        if (hostScan) cudaFreeHost(hostScan);
+        if (eventInferenceDone) cudaEventDestroy(eventInferenceDone);
+        if (eventPostprocessDone) cudaEventDestroy(eventPostprocessDone);
         if (stream) cudaStreamDestroy(stream);
         // context / engine / runtime 는 unique_ptr 가 선언 역순으로 지움
     }
 
 private:
     void printCheckSummary() const;
+    void printPostCheckSummary() const;
 };
 
 // GPU 전처리: 업로드 1번 + 커널 1번. ROI 뷰(Crop)도 행 간격(image.step)을 그대로 받음
@@ -644,13 +678,64 @@ void TensorRTBackend::Impl::printCheckSummary() const {
     }
 }
 
+// GPU 후보 목록 vs CPU 경로(cv::minMaxLoc) vs CPU 기준 함수(scanYoloCandidate). 후보의 7값(번호·클래스·점수·박스)을 비트 단위로 비교함
+void TensorRTBackend::Impl::comparePostprocessWithCpu(const std::vector<YoloCandidate>& gpu) {
+    // CPU 경로·기준 함수는 출력 텐서 전체가 필요함 (측정 경로에서는 이 D2H 가 없음)
+    checkCuda(cudaMemcpy(hostOutput, deviceOutput, outputBytes, cudaMemcpyDeviceToHost), "확인용 출력 D2H");
+    const int rows = static_cast<int>(outputDims.d[1]);
+    const int cols = static_cast<int>(outputDims.d[2]);
+    const std::vector<YoloCandidate> cpu = scanYoloOutput(hostOutput, rows, cols, checkThreshold);
+    const std::vector<YoloCandidate> reference = scanYoloOutputReference(hostOutput, rows, cols, checkThreshold);
+
+    // 다른 후보 수 = 같은 자리끼리 다른 것 + 한쪽에만 있는 것
+    auto compare = [](const std::vector<YoloCandidate>& a, const std::vector<YoloCandidate>& b, PostCheckStats& stats) {
+        const std::size_t common = std::min(a.size(), b.size());
+        long long different = static_cast<long long>(std::max(a.size(), b.size()) - common);
+        for (std::size_t i = 0; i < common; ++i) {
+            if (std::memcmp(&a[i], &b[i], sizeof(YoloCandidate)) != 0) ++different;
+        }
+        if (different > 0) ++stats.frames;
+        stats.candidates += different;
+        return different;
+    };
+    const long long gpuCpu = compare(gpu, cpu, postGpuVsCpu);
+    const long long gpuReference = compare(gpu, reference, postGpuVsReference);
+    const long long referenceCpu = compare(reference, cpu, postReferenceVsCpu);
+    ++postCheckedFrames;
+
+    // 다른 프레임은 앞쪽 몇 개만 바로 찍음
+    if ((gpuCpu > 0 || gpuReference > 0 || referenceCpu > 0) && postGpuVsCpu.frames + postGpuVsReference.frames + postReferenceVsCpu.frames <= 5) {
+        std::cerr << "[GPU 후처리 확인] 입력 " << inputSize.width << "x" << inputSize.height << " 호출 " << postCheckedFrames
+                  << ": 후보 GPU " << gpu.size() << " / CPU " << cpu.size() << " / 기준 " << reference.size()
+                  << "개, GPU≠CPU " << gpuCpu << "개, GPU≠기준 " << gpuReference << "개, 기준≠CPU " << referenceCpu << "개\n";
+    }
+}
+
+void TensorRTBackend::Impl::printPostCheckSummary() const {
+    auto line = [this](const char* name, const PostCheckStats& stats) {
+        std::cerr << "  " << name << ": 같음 " << (postCheckedFrames - stats.frames) << " / 다름 " << stats.frames
+                  << " (다른 후보 " << stats.candidates << "개)\n";
+    };
+    std::cerr << "[GPU 후처리 확인] 입력 " << inputSize.width << "x" << inputSize.height << ", 비교한 호출 " << postCheckedFrames << "\n";
+    line("GPU = CPU 경로      ", postGpuVsCpu);
+    line("GPU = 기준 함수     ", postGpuVsReference);
+    line("기준 함수 = CPU 경로", postReferenceVsCpu);
+    if (postReferenceVsCpu.candidates > 0) {
+        std::cerr << "  → 이 장비 cv::minMaxLoc 이 \"같은 값이면 앞 인덱스\" 규칙과 다르거나 출력에 NaN 이 있음. 비트 일치 전제가 깨짐\n";
+    } else if (postGpuVsReference.candidates > 0) {
+        std::cerr << "  → 기준 함수와 GPU 가 다름 = 커널·D2H 문제\n";
+    } else if (postGpuVsCpu.candidates == 0) {
+        std::cerr << "  → 후보 목록이 CPU 경로와 비트 단위로 같음\n";
+    }
+}
+
 // ------------------------------------------------------------
 // 생성자: 엔진 준비 → I/O 텐서 조사 → 버퍼 할당 → 주소 바인딩
 // ------------------------------------------------------------
 
 TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
                                  const cv::Size& expectedInputSize, const std::string& calibrationList, const Int8Tuning& int8Tuning,
-                                 const PreprocessOptions& preprocess)
+                                 const PreprocessOptions& preprocess, const PostprocessOptions& postprocess)
     : impl_(std::make_unique<Impl>()), confidenceThreshold_(confidenceThreshold), nmsThreshold_(nmsThreshold) {
     using namespace nvinfer1;
 
@@ -763,10 +848,27 @@ TensorRTBackend::TensorRTBackend(const std::string& modelPath, const std::string
         impl_->gpuPreprocessCheck = preprocess.check;
     }
 
+    // 6) GPU 후처리: 출력 (1, C, N) 의 후보 N 개 자리 (records + flags) 를 장치·호스트(pinned)에 잡고, 시간 재기용 이벤트를 만듦
+    if (postprocess.gpu) {
+        impl_->outputLayout = yoloOutputLayout(static_cast<int>(impl_->outputDims.d[1]), static_cast<int>(impl_->outputDims.d[2]));
+        if (impl_->outputLayout.channels <= 4) {
+            throw std::runtime_error("GPU 후처리: 출력 채널이 4 이하라 클래스 점수가 없음 " + dimsToString(impl_->outputDims));
+        }
+        impl_->scanBytes = static_cast<std::size_t>(impl_->outputLayout.columns) * (sizeof(YoloCandidate) + 1);
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&impl_->deviceScan), impl_->scanBytes), "cudaMalloc(scan)");
+        checkCuda(cudaMallocHost(reinterpret_cast<void**>(&impl_->hostScan), impl_->scanBytes), "cudaMallocHost(scan)");
+        checkCuda(cudaEventCreate(&impl_->eventInferenceDone), "cudaEventCreate(inference)");
+        checkCuda(cudaEventCreate(&impl_->eventPostprocessDone), "cudaEventCreate(postprocess)");
+        impl_->gpuPostprocess = true;
+        impl_->gpuPostprocessCheck = postprocess.check;
+        impl_->checkThreshold = confidenceThreshold;
+    }
+
     std::cerr << "[TensorRT] 준비 완료 " << precision
               << " 입력 " << impl_->inputName << dimsToString(impl_->inputDims)
               << " 출력 " << impl_->outputName << dimsToString(impl_->outputDims)
-              << " 전처리 " << (preprocess.gpu ? (preprocess.check ? "GPU (CPU 경로와 비교)" : "GPU") : "CPU") << '\n';
+              << " 전처리 " << (preprocess.gpu ? (preprocess.check ? "GPU (CPU 경로와 비교)" : "GPU") : "CPU")
+              << " 후처리 " << (postprocess.gpu ? (postprocess.check ? "GPU (CPU 경로와 비교)" : "GPU") : "CPU") << '\n';
 }
 
 bool TensorRTBackend::usesGpuPreprocess() const { return impl_->gpuPreprocess; }
@@ -779,8 +881,9 @@ TensorRTBackend::~TensorRTBackend() = default;
 // 단계 구분은 OpenCVDNNBackend 와 맞춤
 //   preprocess  : letterbox + blob (CPU). GPU 전처리면 업로드 + 커널 + sync
 //   inference   : H2D 복사 + enqueue + D2H 복사 + 동기화. GPU 전처리면 H2D 없음
-//   postprocess : 디코드 + NMS (CPU)
-// 두 경로는 "추론" 칸에 든 것이 달라서(H2D) 칸끼리 바로 비교하지 않음. Full + Crop YOLO 합·프레임 p50 으로 비교함
+//                 GPU 후처리면 출력 텐서 전체 D2H 대신 후보 훑기 커널 + flags·records D2H (gpuPostprocess 가 그 GPU 시간)
+//   postprocess : 디코드 + NMS (CPU). GPU 후처리면 후보 모으기 + 좌표 복원 + NMS
+// 경로마다 "추론" 칸에 든 것이 달라서(H2D·D2H·커널) 칸끼리 바로 비교하지 않음. Full + Crop YOLO 합·프레임 p50 으로 비교함
 
 std::vector<Detection> TensorRTBackend::infer(const cv::Mat& image, InferenceTiming* timing) {
     return runInference(image, nullptr, cv::Rect(), timing);
@@ -856,23 +959,55 @@ std::vector<Detection> TensorRTBackend::runInference(const cv::Mat& image, const
     if (!t.context->enqueueV3(t.stream)) {
         throw std::runtime_error("TensorRT enqueueV3 실패");
     }
-    checkCuda(cudaMemcpyAsync(t.hostOutput, t.deviceOutput, t.outputBytes, cudaMemcpyDeviceToHost, t.stream), "D2H");
-    checkCuda(cudaStreamSynchronize(t.stream), "cudaStreamSynchronize");
-    const auto inferenceEnd = std::chrono::steady_clock::now();
+    std::vector<Detection> detections;
+    std::chrono::steady_clock::time_point inferenceEnd;
+    std::chrono::steady_clock::time_point postprocessEnd;
+    double checkMilliseconds = 0.0;   // --gpu-postprocess-check 비교 시간 (후처리 시간에서 뺌)
+    std::optional<double> gpuPostprocessMilliseconds;
+    if (t.gpuPostprocess) {
+        // GPU 후처리: 출력 텐서를 호스트로 안 가져옴. 같은 stream 에서 커널이 후보를 훑고 flags·records 만 D2H 함
+        checkCuda(cudaEventRecord(t.eventInferenceDone, t.stream), "추론 끝 이벤트");
+        checkCuda(launchScanCandidatesKernel(static_cast<const float*>(t.deviceOutput), t.outputLayout, confidenceThreshold_,
+                                             t.deviceFlags(), t.deviceRecords(), t.stream),
+                  "후보 훑기 커널");
+        checkCuda(cudaMemcpyAsync(t.hostScan, t.deviceScan, t.scanBytes, cudaMemcpyDeviceToHost, t.stream), "후보 D2H");
+        checkCuda(cudaEventRecord(t.eventPostprocessDone, t.stream), "후처리 끝 이벤트");
+        checkCuda(cudaStreamSynchronize(t.stream), "cudaStreamSynchronize");
+        inferenceEnd = std::chrono::steady_clock::now();
 
-    // 후처리. 계산은 OpenCVDNNBackend 와 같은 YoloCommon 코드를 씀
-    std::vector<Detection> detections = decodeYoloOutput(
-        t.hostOutput,
-        static_cast<int>(t.outputDims.d[1]),
-        static_cast<int>(t.outputDims.d[2]),
-        prepared, image.size(), confidenceThreshold_, nmsThreshold_);
-    const auto postprocessEnd = std::chrono::steady_clock::now();
+        // 후처리 (CPU): 후보 모으기 → 좌표 복원·필터·NMS (decodeYoloOutput 의 2단계와 같은 코드)
+        const std::vector<YoloCandidate> candidates = gatherYoloCandidates(t.hostFlags(), t.hostRecords(), t.outputLayout.columns);
+        if (t.gpuPostprocessCheck) {
+            // 측정 구간 밖: 출력 텐서 전체를 가져와 CPU 경로와 비교함
+            const auto checkStart = std::chrono::steady_clock::now();
+            t.comparePostprocessWithCpu(candidates);
+            checkMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - checkStart).count();
+        }
+        detections = restoreYoloCandidates(candidates, prepared, image.size(), confidenceThreshold_, nmsThreshold_);
+        postprocessEnd = std::chrono::steady_clock::now();
+
+        float elapsed = 0.0F;
+        checkCuda(cudaEventElapsedTime(&elapsed, t.eventInferenceDone, t.eventPostprocessDone), "후처리 이벤트 시간");
+        gpuPostprocessMilliseconds = static_cast<double>(elapsed);
+    } else {
+        checkCuda(cudaMemcpyAsync(t.hostOutput, t.deviceOutput, t.outputBytes, cudaMemcpyDeviceToHost, t.stream), "D2H");
+        checkCuda(cudaStreamSynchronize(t.stream), "cudaStreamSynchronize");
+        inferenceEnd = std::chrono::steady_clock::now();
+
+        // 후처리. 계산은 OpenCVDNNBackend 와 같은 YoloCommon 코드를 씀
+        detections = decodeYoloOutput(
+            t.hostOutput,
+            static_cast<int>(t.outputDims.d[1]),
+            static_cast<int>(t.outputDims.d[2]),
+            prepared, image.size(), confidenceThreshold_, nmsThreshold_);
+        postprocessEnd = std::chrono::steady_clock::now();
+    }
 
     if (timing != nullptr) {
         timing->preprocessMilliseconds = std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
         timing->inferenceMilliseconds = std::chrono::duration<double, std::milli>(inferenceEnd - inferenceStart).count();
-        timing->postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - inferenceEnd).count();
-        // 세부 타이머 (전처리 안의 몫). 경로에 없는 칸은 비워 둠
+        timing->postprocessMilliseconds = std::chrono::duration<double, std::milli>(postprocessEnd - inferenceEnd).count() - checkMilliseconds;
+        timing->gpuPostprocessMilliseconds = gpuPostprocessMilliseconds;
         if (t.gpuPreprocess) {
             timing->gpuPreprocessMilliseconds = timing->preprocessMilliseconds;
         } else {

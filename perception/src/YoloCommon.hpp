@@ -1,5 +1,6 @@
 #pragma once
 
+#include "YoloCandidate.hpp"
 #include "perception/Detection.hpp"
 
 #include <opencv2/core.hpp>
@@ -51,11 +52,33 @@ LetterboxResult letterbox(const cv::Mat& frame, const cv::Size& inputSize, Lette
  * imageSize   : 원본 이미지 크기 (좌표 클램프용)
  *
  * 디코드 → 원본 좌표 복원 → 클래스 필터 → 그룹 NMS 까지 처리함
+ * = scanYoloOutput (1단계) + restoreYoloCandidates (2단계). 결과는 나누기 전과 같음 (golden 유지)
  */
 std::vector<Detection> decodeYoloOutput(
     const float* output,
     int rows,
     int cols,
+    const LetterboxResult& prepared,
+    const cv::Size& imageSize,
+    float confidenceThreshold,
+    float nmsThreshold
+);
+
+/*
+ * decodeYoloOutput 의 두 단계. GPU 후처리(--gpu-postprocess)는 1단계만 GPU 커널로 하고 2단계는 같은 CPU 코드를 씀
+ *   1단계 scanYoloOutput        : 후보마다 클래스 최댓값(cv::minMaxLoc) → 문턱(score < threshold 면 버림) → YoloCandidate 목록 (후보 번호 순)
+ *   2단계 restoreYoloCandidates : 박스 좌표 복원 → 클램프 → 빈 박스·대상 클래스 필터 → 그룹 NMS
+ *
+ * yoloOutputLayout         : (rows, cols) 가 (C, N) 인지 (N, C) 인지 보고 읽는 자리를 정함 (rows < cols 면 (C, N). decodeYoloOutput 의 전치 조건과 같음)
+ * scanYoloOutputReference  : 1단계를 GPU 커널과 같은 함수(scanYoloCandidate)로 CPU 에서 한 것. --gpu-postprocess-check 비교용
+ * gatherYoloCandidates     : 커널 결과(flags·records, 길이 columns)를 후보 번호 순 목록으로 모음
+ */
+YoloOutputLayout yoloOutputLayout(int rows, int cols);
+std::vector<YoloCandidate> scanYoloOutput(const float* output, int rows, int cols, float confidenceThreshold);
+std::vector<YoloCandidate> scanYoloOutputReference(const float* output, int rows, int cols, float confidenceThreshold);
+std::vector<YoloCandidate> gatherYoloCandidates(const unsigned char* flags, const YoloCandidate* records, int columns);
+std::vector<Detection> restoreYoloCandidates(
+    const std::vector<YoloCandidate>& candidates,
     const LetterboxResult& prepared,
     const cv::Size& imageSize,
     float confidenceThreshold,

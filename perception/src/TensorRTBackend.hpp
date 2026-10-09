@@ -35,6 +35,11 @@
  *   기본은 CPU 경로 (letterbox → blobFromImage → pinned memcpy → H2D)
  *   gpu 면 프레임을 장치로 한 번 올리고 커널 하나가 letterbox·RGB·/255 를 해서 입력 버퍼에 바로 씀 (GpuPreprocess.cu)
  *   커널은 OpenCV 8비트 resize 와 같은 정수식이라 입력 텐서가 CPU 경로와 비트 단위로 같아야 함 (check 로 확인)
+ *
+ * 후처리 경로 (PostprocessOptions)
+ *   기본은 CPU 경로 (출력 텐서 전체 D2H → 전치 → 후보마다 cv::minMaxLoc → 좌표 복원 → NMS)
+ *   gpu 면 커널 하나가 후보마다 클래스 최댓값·문턱 비교를 하고(GpuPostprocess.cu) 문턱을 넘은 후보만 D2H 함. 좌표 복원·NMS 는 같은 CPU 코드
+ *   커널은 비교만 하므로 후보 목록이 CPU 경로와 비트 단위로 같아야 함 (check 로 확인)
  */
 class TensorRTBackend : public InferenceBackend {
 public:
@@ -43,9 +48,10 @@ public:
     // calibrationList 는 int8 에서 엔진을 새로 만들 때 쓰는 이미지 목록 파일. 그 외에는 무시함
     // int8Tuning 은 int8 실험용 (InferenceBackend.hpp 의 Int8Tuning). 기본값이면 정식 엔진과 같음
     // preprocess 는 전처리 경로 (InferenceBackend.hpp 의 PreprocessOptions). 기본값이면 CPU 경로
+    // postprocess 는 후처리 경로 (InferenceBackend.hpp 의 PostprocessOptions). 기본값이면 CPU 경로
     TensorRTBackend(const std::string& modelPath, const std::string& precision, float confidenceThreshold, float nmsThreshold,
                     const cv::Size& expectedInputSize, const std::string& calibrationList = "", const Int8Tuning& int8Tuning = Int8Tuning(),
-                    const PreprocessOptions& preprocess = PreprocessOptions());
+                    const PreprocessOptions& preprocess = PreprocessOptions(), const PostprocessOptions& postprocess = PostprocessOptions());
     ~TensorRTBackend() override;
 
     TensorRTBackend(const TensorRTBackend&) = delete;

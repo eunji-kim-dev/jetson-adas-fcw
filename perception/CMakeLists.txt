@@ -34,8 +34,8 @@ target_link_libraries(perception_core
 # TensorRT 백엔드는 선택 사항임. 최상위에서 ENABLE_TENSORRT=ON 일 때만 붙임
 # TensorRT / CUDA 타입은 src/TensorRTBackend.cpp 안에만 있어서 전부 PRIVATE
 if(ENABLE_TENSORRT)
-    # GpuPreprocess.cu: --gpu-preprocess 커널 (nvcc, 최상위에서 enable_language(CUDA))
-    target_sources(perception_core PRIVATE src/TensorRTBackend.cpp src/GpuPreprocess.cu)
+    # GpuPreprocess.cu: --gpu-preprocess 커널, GpuPostprocess.cu: --gpu-postprocess 커널 (nvcc, 최상위에서 enable_language(CUDA))
+    target_sources(perception_core PRIVATE src/TensorRTBackend.cpp src/GpuPreprocess.cu src/GpuPostprocess.cu)
     set_target_properties(perception_core PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
     target_compile_definitions(perception_core PRIVATE PERCEPTION_HAS_TENSORRT)
     target_include_directories(perception_core PRIVATE ${TENSORRT_INCLUDE_DIR})

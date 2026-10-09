@@ -29,7 +29,8 @@ const char* const kCsvHeader =
     "distance_m,ttr_h,h_valid,h_level,p_level,"
     "resize_full_ms,pad_full_ms,blob_full_ms,pinned_copy_full_ms,"
     "resize_crop_ms,pad_crop_ms,blob_crop_ms,pinned_copy_crop_ms,"
-    "crop_clone_ms,gpu_pre_full_ms,gpu_pre_crop_ms";
+    "crop_clone_ms,gpu_pre_full_ms,gpu_pre_crop_ms,"
+    "gpu_post_full_ms,gpu_post_crop_ms";
 
 std::string jsonEscape(const std::string& text) {
     std::string out;
@@ -148,7 +149,8 @@ void RunLogger::writeFrame(const FrameRecord& r) {
               << cell(r.hLevel) << ',' << cell(r.pLevel) << ','
               << cell(r.resizeFullMs) << ',' << cell(r.padFullMs) << ',' << cell(r.blobFullMs) << ',' << cell(r.pinnedCopyFullMs) << ','
               << cell(r.resizeCropMs) << ',' << cell(r.padCropMs) << ',' << cell(r.blobCropMs) << ',' << cell(r.pinnedCopyCropMs) << ','
-              << cell(r.cropCloneMs) << ',' << cell(r.gpuPreprocessFullMs) << ',' << cell(r.gpuPreprocessCropMs)
+              << cell(r.cropCloneMs) << ',' << cell(r.gpuPreprocessFullMs) << ',' << cell(r.gpuPreprocessCropMs) << ','
+              << cell(r.gpuPostprocessFullMs) << ',' << cell(r.gpuPostprocessCropMs)
               << '\n';
     ++framesProcessed_;
 }
@@ -201,6 +203,7 @@ void RunLogger::writeSummary() {
          << "  \"crop_model\": " << jsonString(m.cropModel) << ",\n"
          << "  \"crop_input\": " << jsonString(m.cropInput) << ",\n"
          << "  \"preprocess\": " << jsonString(m.preprocess) << ",\n"
+         << "  \"postprocess\": " << jsonString(m.postprocess) << ",\n"
          << "  \"lane_roi\": " << jsonString(m.laneRoi) << ",\n"
          << "  \"lead_rule\": " << jsonString(m.leadRule) << ",\n"
          << "  \"ttc_mode\": " << jsonString(m.ttcMode) << ",\n"

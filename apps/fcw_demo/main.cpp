@@ -327,16 +327,20 @@ int main(int argc, char* argv[]) {
     PreprocessOptions preprocessOptions;
     preprocessOptions.gpu = options.gpuPreprocess;
     preprocessOptions.check = options.gpuPreprocessCheck;
+    // --gpu-postprocess: Full·Crop 두 엔진 모두 후보 훑기를 GPU 커널로 함 (기본 꺼짐 = CPU 경로)
+    PostprocessOptions postprocessOptions;
+    postprocessOptions.gpu = options.gpuPostprocess;
+    postprocessOptions.check = options.gpuPostprocessCheck;
     // 카메라 입력을 detector 보다 먼저 선언함 → 끝날 때 detector(카메라 버퍼 CUDA 등록)가 먼저 지워지고 카메라 버퍼(munmap)는 나중에 풀림 (--camera-zero-copy)
     std::unique_ptr<FrameSource> sourcePtr;
     std::unique_ptr<YoloDetector> detectorPtr;
     try {
         // calibration 목록은 tensorrt_int8 이 엔진을 처음 만들 때만 쓰고, 다른 백엔드는 무시함
-        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList, int8Tuning, preprocessOptions);
+        std::unique_ptr<InferenceBackend> backend = createInferenceBackend(backendName, modelPath, detectorThreshold, nmsThreshold, cv::Size(640, 640), options.calibList, int8Tuning, preprocessOptions, postprocessOptions);
         std::unique_ptr<InferenceBackend> cropBackend;
         if (!options.cropModelPath.empty()) {
             const cv::Size cropInputSize(options.cropInputWidth, options.cropInputHeight);
-            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning, preprocessOptions);
+            cropBackend = createInferenceBackend(backendName, options.cropModelPath, detectorThreshold, nmsThreshold, cropInputSize, options.cropCalibList, int8Tuning, preprocessOptions, postprocessOptions);
         }
         detectorPtr = std::make_unique<YoloDetector>(std::move(backend), nmsThreshold, std::move(cropBackend), cropEdgeRule);
     } catch (const std::exception& error) {
@@ -348,6 +352,8 @@ int main(int argc, char* argv[]) {
     std::cout << "[INFO] 전처리: " << (options.gpuPreprocessCheck ? "GPU 커널 + CPU 경로 비교 (--gpu-preprocess-check, 측정용 아님)"
                                        : options.gpuPreprocess ? "GPU 커널 (--gpu-preprocess)" : "CPU (letterbox + blob)")
               << (options.cameraZeroCopy ? " / 카메라 YUYV 버퍼를 GPU 가 직접 읽음 (--camera-zero-copy, v2)" : "") << '\n';
+    std::cout << "[INFO] 후처리: " << (options.gpuPostprocessCheck ? "GPU 커널 + CPU 경로 비교 (--gpu-postprocess-check, 측정용 아님)"
+                                       : options.gpuPostprocess ? "GPU 커널 (--gpu-postprocess, 좌표 복원·NMS 는 CPU)" : "CPU (전치 + minMaxLoc + NMS)") << '\n';
     if (options.cropModelPath.empty()) {
         std::cout << "[INFO] crop 추론: 전체 프레임과 같은 모델 (640x640)\n";
     } else {
@@ -619,6 +625,8 @@ int main(int argc, char* argv[]) {
     // --camera-zero-copy 면 gpu_zero_copy (check 와 같이 돌면 gpu_zero_copy_check)
     runMetadata.preprocess = options.cameraZeroCopy ? (options.gpuPreprocessCheck ? "gpu_zero_copy_check" : "gpu_zero_copy")
                            : options.gpuPreprocessCheck ? "gpu_check" : options.gpuPreprocess ? "gpu" : "cpu";
+    // 어느 후처리 경로로 나온 결과인지 run_summary 에 남김 (GPU 후처리 비교용)
+    runMetadata.postprocess = options.gpuPostprocessCheck ? "gpu_check" : options.gpuPostprocess ? "gpu" : "cpu";
     // 영상별 ROI 가 달라지므로 어느 ROI 로 나온 결과인지 run_summary 에 남김
     if (options.laneRoiPx.empty()) {
         runMetadata.laneRoi = "default";
@@ -1111,6 +1119,8 @@ int main(int argc, char* argv[]) {
         record.cropCloneMs = detectionTiming.cropCloneMilliseconds;
         record.gpuPreprocessFullMs = detectionTiming.fullInference.gpuPreprocessMilliseconds;
         record.gpuPreprocessCropMs = detectionTiming.farInference.gpuPreprocessMilliseconds;
+        record.gpuPostprocessFullMs = detectionTiming.fullInference.gpuPostprocessMilliseconds;
+        record.gpuPostprocessCropMs = detectionTiming.farInference.gpuPostprocessMilliseconds;
         record.mergeMs = postprocessMilliseconds;
         record.detectMs = inferenceMilliseconds;
         record.trackingMs = std::chrono::duration<double, std::milli>(trackingEnd - trackingStart).count();

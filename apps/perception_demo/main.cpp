@@ -40,6 +40,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "[ERROR] --gpu-preprocess / --gpu-preprocess-check 는 adas 전용임 (perception_demo 는 CPU 전처리만)\n";
         return 1;
     }
+    if (options.gpuPostprocess) {
+        std::cerr << "[ERROR] --gpu-postprocess / --gpu-postprocess-check 는 adas 전용임 (perception_demo 는 CPU 후처리만)\n";
+        return 1;
+    }
     const std::string& inputPath = options.inputPath;
     const std::string& backendName = options.backendName;
 

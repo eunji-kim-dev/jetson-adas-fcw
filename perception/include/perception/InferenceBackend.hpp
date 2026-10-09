@@ -20,6 +20,9 @@
 // - pinnedCopy          : blob → pinned 버퍼 memcpy (TensorRT CPU 경로만)
 // - gpuPreprocess       : 프레임 업로드 + 커널 + sync 벽시계 (TensorRT --gpu-preprocess 경로만. 이때 preprocess 와 같은 값)
 //                         v2(--camera-zero-copy)는 업로드가 없어 커널 + sync 만임
+// - gpuPostprocess      : 후보 훑기 커널 + flags·records D2H 의 GPU 시간 (TensorRT --gpu-postprocess 경로만, cudaEvent 로 잼)
+//                         이 경로에서 inference 는 enqueue + 이 커널 + 작은 D2H + sync 이고 (출력 텐서 전체 D2H 는 없음),
+//                         postprocess 는 후보 모으기 + 좌표 복원 + NMS (CPU) 임
 struct InferenceTiming {
     double preprocessMilliseconds = 0.0;
     double inferenceMilliseconds = 0.0;
@@ -29,6 +32,7 @@ struct InferenceTiming {
     std::optional<double> blobMilliseconds;
     std::optional<double> pinnedCopyMilliseconds;
     std::optional<double> gpuPreprocessMilliseconds;
+    std::optional<double> gpuPostprocessMilliseconds;
 };
 
 /*
@@ -39,6 +43,19 @@ struct InferenceTiming {
  *           다른 값 수를 셈. 끝날 때 요약을 표준 에러로 냄 (확인용이라 느림. 측정에는 안 씀)
  */
 struct PreprocessOptions {
+    bool gpu = false;
+    bool check = false;
+};
+
+/*
+ * 후처리 경로 (--gpu-postprocess). 기본은 CPU 경로 (golden 보존)
+ *   gpu   : TensorRT 전용. 출력 텐서를 호스트로 가져오지 않고 GPU 커널이 후보마다 클래스 최댓값·문턱 비교를 함 (YoloCandidate.hpp)
+ *           문턱을 넘은 후보(번호·클래스·점수·박스 4값, 출력 텐서의 float 그대로)만 D2H 하고, 좌표 복원·NMS 는 CPU 의 기존 코드로 함
+ *           커널은 비교만 하고 실수 계산을 안 하므로 후보 목록이 CPU 경로와 비트 단위로 같음 → golden 그대로
+ *   check : gpu 와 같이 씀. 프레임마다 출력 텐서 전체도 가져와 GPU 후보 목록을 CPU 경로(cv::minMaxLoc)·CPU 기준 함수와 비교해
+ *           다른 후보 수를 셈. 끝날 때 요약을 표준 에러로 냄 (확인용이라 느림. 측정에는 안 씀)
+ */
+struct PostprocessOptions {
     bool gpu = false;
     bool check = false;
 };
@@ -105,6 +122,7 @@ struct Int8Tuning {
  *   다른 백엔드는 무시함.
  * int8Tuning 도 tensorrt_int8 전용 (위 Int8Tuning). 기본값이면 정식 엔진과 같음.
  * preprocess 는 전처리 경로 (위 PreprocessOptions). gpu 는 tensorrt_* 만 받고, 다른 백엔드면 std::invalid_argument.
+ * postprocess 는 후처리 경로 (위 PostprocessOptions). 마찬가지로 gpu 는 tensorrt_* 만 받음.
  */
 std::unique_ptr<InferenceBackend> createInferenceBackend(
     const std::string& backendName,
@@ -114,5 +132,6 @@ std::unique_ptr<InferenceBackend> createInferenceBackend(
     const cv::Size& inputSize = cv::Size(640, 640),
     const std::string& calibrationList = "",
     const Int8Tuning& int8Tuning = Int8Tuning(),
-    const PreprocessOptions& preprocess = PreprocessOptions()
+    const PreprocessOptions& preprocess = PreprocessOptions(),
+    const PostprocessOptions& postprocess = PostprocessOptions()
 );

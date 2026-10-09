@@ -12,6 +12,8 @@
 #   --video  on|off|asis   결과 영상을 쓸지 (기본 asis — 바이너리 기본 동작 그대로)
 #   --gpu-preprocess       전처리를 GPU 커널로 함 (adas --gpu-preprocess, tensorrt_* 전용)
 #                          GPU 입력 텐서가 CPU 경로와 비트 단위로 같아서(10/7 Jetson 확인) golden 은 CPU 경로와 같은 값을 씀
+#   --gpu-postprocess      후처리 1단계(후보 훑기)를 GPU 커널로 함 (adas --gpu-postprocess, tensorrt_* 전용)
+#                          후보 목록이 CPU 경로와 비트 단위로 같아서 golden 은 CPU 경로와 같은 값을 씀
 #
 # 사람이 입력하는 것은 실험 이름과 위 두 옵션뿐이고,
 # 나머지 측정 조건은 아래 상수로 고정함
@@ -97,6 +99,7 @@ usage() {
     echo "  예:   bash scripts/benchmark_harness.sh trt_fp16_jetson --backend tensorrt_fp16 --clocks on --video off" >&2
     echo "  crop 전용 모델: --crop-model models/yolov8n_288x640.onnx --crop-input 288x640 (둘 다 있어야 함, golden 은 crop 구조별로 따로 둠)" >&2
     echo "  GPU 전처리: --gpu-preprocess (tensorrt_* 전용, golden 은 CPU 경로와 같음)" >&2
+    echo "  GPU 후처리: --gpu-postprocess (tensorrt_* 전용, golden 은 CPU 경로와 같음. --gpu-preprocess 와 같이 줄 수 있음)" >&2
     exit 2
 }
 
@@ -107,6 +110,7 @@ VIDEO_MODE="asis"
 CROP_MODEL=""
 CROP_INPUT=""
 GPU_PREPROCESS=0
+GPU_POSTPROCESS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -137,6 +141,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --gpu-preprocess)
             GPU_PREPROCESS=1
+            shift
+            ;;
+        --gpu-postprocess)
+            GPU_POSTPROCESS=1
             shift
             ;;
         -h|--help)
@@ -204,8 +212,17 @@ PREPROCESS_PATH="cpu"
 if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
     PREPROCESS_PATH="gpu"
 fi
+# GPU 후처리도 TensorRT 백엔드에만 있음
+if [[ "${GPU_POSTPROCESS}" -eq 1 && "${BACKEND}" != tensorrt_* ]]; then
+    echo "[ERROR] --gpu-postprocess 는 tensorrt_* 백엔드에서만 씀: ${BACKEND}" >&2
+    usage
+fi
+POSTPROCESS_PATH="cpu"
+if [[ "${GPU_POSTPROCESS}" -eq 1 ]]; then
+    POSTPROCESS_PATH="gpu"
+fi
 
-readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT GPU_PREPROCESS PREPROCESS_PATH
+readonly EXPERIMENT_NAME BACKEND CLOCKS_MODE VIDEO_MODE CROP_MODEL CROP_INPUT GPU_PREPROCESS PREPROCESS_PATH GPU_POSTPROCESS POSTPROCESS_PATH
 
 
 # ------------------------------------------------------------
@@ -266,6 +283,7 @@ case "${GOLDEN_KEY}" in
 esac
 # 위 표에 없는 조합은 예전처럼 비교를 건너뛰고 회차별 MD5 만 찍음
 # --gpu-preprocess 도 같은 키를 씀 (GPU 입력 텐서가 CPU 경로와 비트 단위로 같음, 10/7 Jetson 확인)
+# --gpu-postprocess 도 같은 키를 씀 (후보 목록이 CPU 경로와 비트 단위로 같음 — 커널은 비교만 하고 실수 계산을 안 함)
 readonly GOLDEN_REL GOLDEN_MD5
 
 # ------------------------------------------------------------
@@ -756,6 +774,14 @@ if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
         fail "바이너리에 --gpu-preprocess 플래그가 없음 — ④ GPU 전처리가 들어간 빌드인지 확인할 것"
     fi
 fi
+# --gpu-postprocess 도 마찬가지
+if [[ "${GPU_POSTPROCESS}" -eq 1 ]]; then
+    if grep -q -- '--gpu-postprocess' <<< "${help_text:-}"; then
+        ok "후처리를 GPU 경로로 측정함 (--gpu-postprocess)"
+    else
+        fail "바이너리에 --gpu-postprocess 플래그가 없음 — GPU 후처리가 들어간 빌드인지 확인할 것"
+    fi
+fi
 echo
 
 echo "Golden 기준 (${GOLDEN_KEY})"
@@ -910,6 +936,7 @@ printf '  power mode      : %s (%s)\n' "${POWER_MODE}" "${POWER_MODE_SOURCE}"
 printf '  clocks mode     : %s\n' "${CLOCKS_MODE}"
 printf '  video mode      : %s\n' "${VIDEO_MODE}"
 printf '  preprocess      : %s\n' "${PREPROCESS_PATH}"
+printf '  postprocess     : %s\n' "${POSTPROCESS_PATH}"
 printf '  result disk     : %s (%s)\n' "${RESULT_DISK:-unknown}" "${RESULT_DISK_KIND}"
 printf '  warmup frames   : %s\n' "${WARMUP_FRAMES}"
 printf '  measured frames : %s\n' "${MEASURED_FRAMES}"
@@ -1024,6 +1051,9 @@ run_one() {
     fi
     if [[ "${GPU_PREPROCESS}" -eq 1 ]]; then
         bin_args+=(--gpu-preprocess)
+    fi
+    if [[ "${GPU_POSTPROCESS}" -eq 1 ]]; then
+        bin_args+=(--gpu-postprocess)
     fi
 
     # set -e 가 켜져 있어도 || 왼쪽의 실패는 중단 사유가 아님
@@ -1169,6 +1199,7 @@ run_one() {
   "cxx_flags_release": "${CXX_FLAGS_RELEASE}",
   "backend": "${BACKEND}",
   "preprocess": "${PREPROCESS_PATH}",
+  "postprocess": "${POSTPROCESS_PATH}",
   "power_mode": "${POWER_MODE}",
   "power_mode_source": "${POWER_MODE_SOURCE}",
   "clocks_mode": "${CLOCKS_MODE}",
@@ -1289,6 +1320,7 @@ input_md5="$(md5sum "${INPUT_REL}" | awk '{print $1}')"
     printf 'model             : %s\n' "${MODEL_REL}"
     printf 'backend           : %s\n' "${BACKEND}"
     printf 'preprocess        : %s\n' "${PREPROCESS_PATH}"
+    printf 'postprocess       : %s\n' "${POSTPROCESS_PATH}"
     printf 'power_mode        : %s\n' "${POWER_MODE}"
     printf 'power_mode_source : %s\n' "${POWER_MODE_SOURCE}"
     printf 'warmup_frames     : %s\n' "${WARMUP_FRAMES}"

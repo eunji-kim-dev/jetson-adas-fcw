@@ -54,12 +54,36 @@ std::vector<Detection> decodeYoloOutput(
     float confidenceThreshold,
     float nmsThreshold
 ) {
+    // 1단계(클래스 최댓값·문턱) → 2단계(좌표 복원·필터·NMS). 나누기 전과 같은 계산 순서임
+    return restoreYoloCandidates(scanYoloOutput(output, rows, cols, confidenceThreshold), prepared, imageSize, confidenceThreshold, nmsThreshold);
+}
+
+YoloOutputLayout yoloOutputLayout(int rows, int cols) {
+    YoloOutputLayout layout;
+    if (rows < cols) {
+        // (C, N): 채널이 바깥, 후보가 안쪽 (TensorRT·OpenCV DNN 의 YOLOv8 출력 (1, 84, 8400))
+        layout.channels = rows;
+        layout.columns = cols;
+        layout.channelStride = static_cast<std::size_t>(cols);
+        layout.columnStride = 1;
+    } else {
+        // (N, C): 후보가 바깥
+        layout.channels = cols;
+        layout.columns = rows;
+        layout.channelStride = 1;
+        layout.columnStride = static_cast<std::size_t>(cols);
+    }
+    return layout;
+}
+
+// 1단계 (CPU 경로, golden): 후보마다 cv::minMaxLoc 으로 클래스 최댓값을 찾고 문턱을 넘은 것만 남김
+std::vector<YoloCandidate> scanYoloOutput(const float* output, int rows, int cols, float confidenceThreshold) {
     cv::Mat predictions(rows, cols, CV_32F, const_cast<float*>(output));
 
     // (84, 8400) 형태면 (8400, 84)로 전치해 행 하나가 후보 하나가 되게 함
     if (rows < cols) predictions = predictions.t();
 
-    std::vector<Detection> candidates;
+    std::vector<YoloCandidate> candidates;
 
     for (int row = 0; row < predictions.rows; ++row) {
         const float* data = predictions.ptr<float>(row);
@@ -74,6 +98,46 @@ std::vector<Detection> decodeYoloOutput(
         const float rawConfidence = static_cast<float>(bestClassScore);
 
         if (rawConfidence < confidenceThreshold) continue;
+
+        candidates.push_back({row, rawClassId, rawConfidence, centerX, centerY, boxWidth, boxHeight});
+    }
+    return candidates;
+}
+
+// 1단계 기준 함수: GPU 커널과 같은 scanYoloCandidate() 를 후보 순서대로 CPU 에서 돌림 (--gpu-postprocess-check 비교용)
+std::vector<YoloCandidate> scanYoloOutputReference(const float* output, int rows, int cols, float confidenceThreshold) {
+    const YoloOutputLayout layout = yoloOutputLayout(rows, cols);
+    std::vector<YoloCandidate> candidates;
+    for (int column = 0; column < layout.columns; ++column) {
+        YoloCandidate candidate;
+        if (scanYoloCandidate(output, layout, column, confidenceThreshold, candidate)) candidates.push_back(candidate);
+    }
+    return candidates;
+}
+
+// 커널 결과 모으기: flags 가 1 인 후보의 records 만 후보 번호 순으로
+std::vector<YoloCandidate> gatherYoloCandidates(const unsigned char* flags, const YoloCandidate* records, int columns) {
+    std::vector<YoloCandidate> candidates;
+    for (int column = 0; column < columns; ++column) {
+        if (flags[column]) candidates.push_back(records[column]);
+    }
+    return candidates;
+}
+
+// 2단계: 박스 좌표 복원 → 클램프 → 빈 박스·대상 클래스 필터 → 그룹 NMS (나누기 전 decodeYoloOutput 의 나머지 반)
+std::vector<Detection> restoreYoloCandidates(
+    const std::vector<YoloCandidate>& scanned,
+    const LetterboxResult& prepared,
+    const cv::Size& imageSize,
+    float confidenceThreshold,
+    float nmsThreshold
+) {
+    std::vector<Detection> candidates;
+
+    for (const YoloCandidate& scan : scanned) {
+        const float centerX = scan.centerX, centerY = scan.centerY, boxWidth = scan.width, boxHeight = scan.height;
+        const int rawClassId = scan.classIndex;
+        const float rawConfidence = scan.score;
 
         int left = static_cast<int>(std::round((centerX - boxWidth / 2.0F - static_cast<float>(prepared.padX)) / prepared.scale));
         int top = static_cast<int>(std::round((centerY - boxHeight / 2.0F - static_cast<float>(prepared.padY)) / prepared.scale));

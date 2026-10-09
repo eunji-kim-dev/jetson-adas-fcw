@@ -59,6 +59,11 @@
  *   --camera-zero-copy         --camera 전용. GPU 전처리 v2: 카메라 MMAP 버퍼(YUYV)를 CUDA 에 등록해 GPU 가 복사 없이 직접 읽음
  *                              --gpu-preprocess 를 같이 켬. --gpu-preprocess-check 와 같이 주면 v2 입력 텐서를 CPU 경로와 비교함
  *                              --threaded-capture 와는 같이 못 씀 (버퍼를 다음 프레임까지 들고 있어야 함)
+ *   --gpu-postprocess          tensorrt_* 전용. 후처리 1단계(후보마다 클래스 최댓값·문턱 비교)를 GPU 커널로 하고 문턱을 넘은 후보만 D2H 함
+ *                              좌표 복원·NMS 는 기존 CPU 코드. 후보 목록이 CPU 경로와 비트 단위로 같아 golden 그대로 (기본 꺼짐 = CPU 경로)
+ *                              --gpu-preprocess 와 독립이라 따로·같이 다 됨
+ *   --gpu-postprocess-check    --gpu-postprocess 와 같이 돌면서 프레임마다 GPU 후보 목록을 CPU 경로와 비교함
+ *                              끝날 때 표준 에러로 요약을 냄 (확인용이라 느림. 측정에는 안 씀)
  */
 
 struct RunOptions {
@@ -99,6 +104,8 @@ struct RunOptions {
     bool gpuPreprocess = false;          // --gpu-preprocess: TensorRT 입력을 GPU 커널로 만듦
     bool gpuPreprocessCheck = false;     // --gpu-preprocess-check: GPU 입력 텐서를 CPU 경로와 비교 (gpuPreprocess 도 켬)
     bool cameraZeroCopy = false;         // --camera-zero-copy: 카메라 YUYV 버퍼를 GPU 가 직접 읽음 (GPU 전처리 v2, gpuPreprocess 도 켬)
+    bool gpuPostprocess = false;         // --gpu-postprocess: 후보 훑기(클래스 최댓값·문턱)를 GPU 커널로, 좌표 복원·NMS 는 CPU
+    bool gpuPostprocessCheck = false;    // --gpu-postprocess-check: GPU 후보 목록을 CPU 경로와 비교 (gpuPostprocess 도 켬)
 };
 
 // --lead-rule 에 쓸 수 있는 이름. 순서는 문서·로그 표기 순서와 같음
@@ -119,7 +126,7 @@ inline void printUsage(const std::string& programName) {
               << " [--lead-rule overlap,history,gap,passby,gate,bonnet,hold,rank,bottom,edge,cropedge,rawconfirm,turn]"
               << " [--ttc-mode proxy|homography|both --road-points x1,y1,...,x4,y4 --road-size W,L"
               << " [--road-res WxH] [--bonnet-y Y] [--road-frame N] [--road-status TEXT] [--d0-m M]]"
-              << " [--gpu-preprocess | --gpu-preprocess-check] [--camera-zero-copy]\n";
+              << " [--gpu-preprocess | --gpu-preprocess-check] [--camera-zero-copy] [--gpu-postprocess | --gpu-postprocess-check]\n";
 }
 
 // 실패하면 false 를 돌려주고 이유를 stderr 에 출력
@@ -294,6 +301,11 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
         } else if (argument == "--camera-zero-copy") {
             options.gpuPreprocess = true;
             options.cameraZeroCopy = true;
+        } else if (argument == "--gpu-postprocess") {
+            options.gpuPostprocess = true;
+        } else if (argument == "--gpu-postprocess-check") {
+            options.gpuPostprocess = true;
+            options.gpuPostprocessCheck = true;
         } else if (argument == "--ttc-mode") {
             if (!takeValue(i, argument, options.ttcMode)) return false;
             if (options.ttcMode != "proxy" && options.ttcMode != "homography" && options.ttcMode != "both") {
@@ -430,6 +442,11 @@ inline bool parseRunOptions(int argc, char* argv[], const std::string& programNa
     // GPU 전처리는 TensorRT 백엔드에만 있음 (opencv_dnn 은 CPU 추론이라 입력을 GPU 로 만들 이유가 없음)
     if (options.gpuPreprocess && options.backendName.rfind("tensorrt_", 0) != 0) {
         std::cerr << "[ERROR] --gpu-preprocess 는 tensorrt_* 백엔드에서만 씀: " << options.backendName << '\n';
+        return false;
+    }
+    // GPU 후처리도 TensorRT 백엔드에만 있음 (출력 텐서가 GPU 에 있을 때만 뜻이 있음)
+    if (options.gpuPostprocess && options.backendName.rfind("tensorrt_", 0) != 0) {
+        std::cerr << "[ERROR] --gpu-postprocess 는 tensorrt_* 백엔드에서만 씀: " << options.backendName << '\n';
         return false;
     }
     // GPU 전처리 v2 는 카메라 MMAP 버퍼를 처리가 끝날 때(다음 read())까지 들고 있어야 함
