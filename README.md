@@ -5,8 +5,9 @@
 **직접 구현한 범위** — C++17 검출·추적·위험 판단 파이프라인 · V4L2 카메라 캡처 · CUDA 전처리·후처리 커널 · TensorRT 백엔드 · 성능·회귀 검증 도구(측정 harness, 골든 MD5 비교, FCW 채점)
 
 <p align="center">
-  <img src="docs/assets/readme/demo.gif" width="720" alt="선행 차량(LEAD) 선택과 DANGER 경고">
+  <img src="docs/assets/readme/demo_p1_130518.gif" width="760" alt="p1_130518 — 앞차를 LEAD로 잡고 추돌 전 DANGER 경고">
 </p>
+<p align="center"><sub>p1_130518 · 처음 보는 영상(홀드아웃) · 앞차 접근 → SAFE·CAUTION·DANGER 변화 → 충돌 0.87초 전 경고 · Jetson TensorRT FP16</sub></p>
 
 | 항목 | 결과 |
 | --- | --- |
@@ -40,6 +41,17 @@
 | 홀드아웃 양성 5개 | 평가만 — 결과로 코드를 고치지 않음 | 경고 성공 4, 누락 1 |
 | 홀드아웃 음성 5개 | 평가만 — 결과로 코드를 고치지 않음 | DANGER 오경보 1 |
 | 이륜차 5개 | 실행·기록만 — 검출 단계 한계로 집계 제외 | 미해결 |
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/demo_17_072.gif" alt="17_072 — 옆 차로 큰 버스에 흔들리지 않고 앞차를 LEAD로 유지"></td>
+    <td width="50%"><img src="docs/assets/readme/demo_7_100.gif" alt="7_100 — 안전하게 끼어든 차를 LEAD로 받고 SAFE 유지"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>17_072 · 옆 차량 제외 — 화면을 크게 차지하는 옆 차로 버스에 흔들리지 않고 실제 앞차를 LEAD로 유지</sub></td>
+    <td align="center"><sub>7_100 · 안전한 끼어들기 — 오른쪽 SUV가 앞으로 들어오면 LEAD로 받아들이고 경고 없이 SAFE 유지</sub></td>
+  </tr>
+</table>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/q1_lead_time_dark.png">
